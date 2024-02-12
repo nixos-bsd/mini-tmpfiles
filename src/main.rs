@@ -1,3 +1,6 @@
+mod config_file;
+mod parser;
+
 use clap::Parser;
 use std::{
     collections::BTreeMap,
