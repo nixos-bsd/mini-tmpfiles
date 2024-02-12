@@ -1,9 +1,14 @@
-use std::str::FromStr;
+use std::ffi::OsString;
 use std::time::Duration;
+use std::{path::PathBuf, str::FromStr};
 
+use nom::branch::alt;
+use nom::bytes::complete::{take_till, take_till1};
+use nom::character::complete::{anychar, char};
+use nom::combinator::{all_consuming, fail};
+use nom::sequence::tuple;
 use nom::{
-    bytes::complete::tag,
-    bytes::complete::take_while,
+    bytes::complete::{tag, take_while},
     character::{
         complete::{digit1, one_of},
         is_alphabetic,
@@ -13,9 +18,10 @@ use nom::{
     sequence::pair,
     IResult,
 };
+use nom::{AsChar, FindToken, InputTakeAtPosition};
 use phf::phf_map;
 
-use crate::config_file::CleanupAge;
+use crate::config_file::{CleanupAge, FileOwner, Line, LineAction, LineType};
 
 // Saturating_mul here because const trait isn't stable at time of writing
 static NANOSECOND: Duration = Duration::from_nanos(1);
@@ -136,6 +142,152 @@ fn parse_cleanup_age(input: &[u8]) -> IResult<&[u8], CleanupAge> {
     cleanup_age.age = duration;
 
     Ok((input, cleanup_age))
+}
+
+fn line_space(input: &[u8]) -> IResult<&[u8], &[u8]> {
+    input.split_at_position1_complete(
+        |item| {
+            let c = item.as_char();
+            !matches!(c, ' ' | '\t')
+        },
+        nom::error::ErrorKind::Alpha,
+    )
+}
+
+fn parse_line(input: &[u8]) -> IResult<&[u8], Line> {
+    let (input, (line_type, _, path, _, mode, _, owner, _, group, _, age, _, argument)) =
+        tuple((
+            parse_type,
+            line_space,
+            parse_path,
+            line_space,
+            parse_mode,
+            line_space,
+            parse_owner,
+            line_space,
+            parse_group,
+            line_space,
+            parse_cleanup_age,
+            line_space,
+            parse_argument,
+        ))(input)?;
+
+    Ok((
+        input,
+        Line {
+            line_type,
+            path,
+            mode,
+            owner,
+            group,
+            age,
+            argument,
+        },
+    ))
+}
+
+fn parse_mode(input: &[u8]) -> IResult<&[u8], Option<u32>> {
+    todo!()
+}
+fn parse_argument(input: &[u8]) -> IResult<&[u8], Option<OsString>> {
+    todo!()
+}
+fn parse_owner(input: &[u8]) -> IResult<&[u8], Option<FileOwner>> {
+    todo!()
+}
+fn parse_group(input: &[u8]) -> IResult<&[u8], Option<FileOwner>> {
+    todo!()
+}
+
+fn parse_path(input: &[u8]) -> IResult<&[u8], PathBuf> {
+    todo!()
+}
+
+fn quoted(input: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (input, quote) = one_of(b"'\"".as_slice())(input)?;
+    let mut input = input;
+    let mut index = 0;
+    loop {
+        match char::from(input[index]) {
+            c @ ('\'' | '"') if c == quote => break,
+            '\\' => index += 2,
+            '\n' => {
+                fail::<_, (), _>(input)?;
+            }
+            _ => index += 1,
+        }
+    }
+    let (input, string) = input.split_at(index);
+    let (input, _) = char(quote)(input)?;
+    Ok((input, string))
+}
+
+fn unescape(input: &[u8]) -> IResult<&[u8], Box<[u8]>> {
+    let (input, string) = alt((quoted, take_till1(|c| matches!(c, b' ' | b'\t'))))(input)?;
+    todo!()
+}
+
+fn parse_type(input: &[u8]) -> IResult<&[u8], LineType> {
+    let (input, unescaped) = unescape(input)?;
+    let unescaped = &*unescaped;
+    let (_, (char, modifiers)) = match all_consuming(tuple((anychar::<_, nom::error::Error<_>>, take_till(|c| char::from(c).is_whitespace()))))(unescaped) {
+        Ok((char, modifiers)) => (char, modifiers),
+        Err(_) => todo!(),
+    };
+    let plus = modifiers.find_token('+');
+    let minus = modifiers.find_token('-');
+    let exclamation = modifiers.find_token('!');
+    let equals = modifiers.find_token('=');
+    let tilde = modifiers.find_token('~');
+    let caret = modifiers.find_token('^');
+    let action = match char {
+        'f' => LineAction::CreateFile,
+        'w' => LineAction::WriteFile,
+        'd' | 'v' | 'q' | 'Q' => LineAction::CreateAndCleanUpDirectory,
+        'D' => LineAction::CreateAndRemoveDirectory,
+        'e' => LineAction::CleanUpDirectory,
+        'p' => LineAction::CreateFifo,
+        'L' => LineAction::CreateSymlink,
+        'c' => LineAction::CreateCharDevice,
+        'b' => LineAction::CreateBlockDevice,
+        'C' => LineAction::Copy,
+        'x' => LineAction::Ignore,
+        'X' => LineAction::IgnoreNonRecursive,
+        'r' => LineAction::Remove,
+        'R' => LineAction::RemoveRecursive,
+        'z' => LineAction::SetMode,
+        'Z' => LineAction::SetModeRecursive,
+        't' => LineAction::SetXattr,
+        'T' => LineAction::SetXattrRecursive,
+        'h' => LineAction::SetAttr,
+        'H' => LineAction::SetAttrRecursive,
+        'a' => LineAction::SetAcl,
+        'A' => LineAction::SetAclRecursive,
+        _ => todo!(),
+    };
+    let recreate = if plus {
+        if matches!(char, 'f' | 'w' | 'p' | 'L' | 'c' | 'b' | 'C' | 'a' | 'A') {
+            true
+        } else {
+            // error
+            todo!()
+        }
+    } else {
+        false
+    };
+    let boot = exclamation;
+    let noerror = minus;
+    let force = equals;
+    Ok((
+        input,
+        LineType {
+            action,
+            recreate,
+            boot,
+            noerror,
+            force,
+        },
+    ))
 }
 
 #[cfg(test)]

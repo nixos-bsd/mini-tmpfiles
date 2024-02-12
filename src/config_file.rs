@@ -13,7 +13,7 @@ pub enum LineAction {
     CreateBlockDevice,
     Copy,
     Ignore,
-    IgnoreRecursive,
+    IgnoreNonRecursive,
     Remove,
     RemoveRecursive,
     SetMode,
@@ -34,6 +34,8 @@ pub struct LineType {
     pub recreate: bool,
     /// Exclamation mark modifier, should only be run during boot
     pub boot: bool,
+    /// Minus sign modifier, means failure during create will not error
+    pub noerror: bool,
     /// Equals sign modifier, remove existing objects if they do not match
     pub force: bool,
 }
@@ -89,11 +91,11 @@ impl CleanupAge {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Line {
-    line_type: LineType,
-    path: PathBuf,
-    mode: Option<u32>,
-    owner: Option<FileOwner>,
-    group: Option<FileOwner>,
-    age: Option<CleanupAge>,
-    argument: Option<OsString>,
+    pub(crate) line_type: LineType,
+    pub(crate) path: PathBuf,
+    pub(crate) mode: Option<u32>,
+    pub(crate) owner: Option<FileOwner>,
+    pub(crate) group: Option<FileOwner>,
+    pub(crate) age: CleanupAge,
+    pub(crate) argument: Option<OsString>,
 }
