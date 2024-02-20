@@ -18,7 +18,7 @@ use nom::{
     sequence::pair,
     IResult,
 };
-use nom::{AsChar, FindToken};
+use nom::{AsChar, FindToken, Finish};
 use phf::phf_map;
 
 use crate::config_file::{CleanupAge, FileOwner, Line, LineAction, LineType, Mode, Spanned};
@@ -130,6 +130,28 @@ fn parse_cleanup_age_by(input: &[u8]) -> IResult<&[u8], CleanupAge> {
     Ok((input, flags))
 }
 
+fn try_optional<B: AsRef<[u8]>, T, E, F: FnOnce(B) -> Result<T, E>>(
+    f: F,
+) -> impl FnOnce(B) -> Result<Option<T>, E> {
+    |input| {
+        if input.as_ref() == b"-" {
+            Ok(None)
+        } else {
+            f(input).map(Option::Some)
+        }
+    }
+}
+
+fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Option<T> {
+    |input| {
+        if input.as_ref() == b"-" {
+            None
+        } else {
+            Some(f(input))
+        }
+    }
+}
+
 fn parse_cleanup_age(input: &[u8]) -> IResult<&[u8], CleanupAge> {
     let (input, maybe_age_by) = opt(pair(parse_cleanup_age_by, tag(b":")))(input)?;
     let (input, duration) = parse_duration(input)?;
@@ -154,27 +176,25 @@ fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
         PathBuf::from(os_string)
     });
     take_inline_whitespace(&mut input)?;
-    let mode = take_field(&mut input)?.try_map(|field| parse_mode(&field))?;
+    let mode = take_field(&mut input)?.try_map(|field| try_optional(parse_mode)(&field))?;
     take_inline_whitespace(&mut input)?;
-    let owner = take_field(&mut input)?.try_map(parse_user)?;
+    let owner = take_field(&mut input)?.try_map(try_optional(parse_user))?;
     take_inline_whitespace(&mut input)?;
-    let group = take_field(&mut input)?.try_map(parse_user)?;
+    let group = take_field(&mut input)?.try_map(try_optional(parse_user))?;
     take_inline_whitespace(&mut input)?;
-    let age = take_field(&mut input)?.try_map(|field| {
-        all_consuming(parse_cleanup_age)(&field)
-            .map(|(_, age)| age)
-            .map_err(|_| ())
-    });
+    let take_field = take_field(&mut input)?;
+    let age = take_field
+        .as_ref()
+        .try_map(try_optional(|field: &Box<[u8]>| {
+            all_consuming(parse_cleanup_age)(field)
+                .finish()
+                .map(|(_, age)| age)
+        }));
     let Ok(age) = age else { todo!() };
+    let age = age.map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input)?;
     let remaining = Spanned::new(input.bytes, input.file, input.char_range);
-    let argument = remaining.map(|bytes| {
-        if bytes == b"-" {
-            None
-        } else {
-            Some(OsString::from_vec(bytes.to_vec()))
-        }
-    });
+    let argument = remaining.map(optional(|bytes: &[u8]| OsString::from_vec(bytes.to_vec())));
 
     Ok(Line {
         line_type,
@@ -223,6 +243,14 @@ impl<'a> FileSpan<'a> {
     }
     fn as_bytes(&self) -> &[u8] {
         &self.bytes[self.cursor..]
+    }
+    fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
+        Self {
+            bytes,
+            file,
+            char_range: 0..bytes.len(),
+            cursor: 0,
+        }
     }
 }
 
@@ -316,46 +344,38 @@ fn take_field(input: &mut FileSpan<'_>) -> Result<Spanned<Box<[u8]>>, ()> {
     ))
 }
 
-fn parse_mode(mut input: &[u8]) -> Result<Option<Mode>, ()> {
-    if input == b"-" {
-        Ok(None)
-    } else {
-        let (masked, keep_existing) = match input.first() {
-            Some(b':') => {
-                input = &input[1..];
-                (false, true)
-            }
-            Some(b'~') => {
-                input = &input[1..];
-                (true, false)
-            }
-            _ => (false, false),
-        };
-        let Ok(string) = std::str::from_utf8(input) else {
-            todo!() // Invalid utf8
-        };
-        let Ok(mode) = u32::from_str_radix(string, 8) else {
-            todo!()
-        };
-        Ok(Some(Mode {
-            value: mode,
-            masked,
-            keep_existing,
-        }))
-    }
+fn parse_mode(mut input: &[u8]) -> Result<Mode, ()> {
+    let (masked, keep_existing) = match input.first() {
+        Some(b':') => {
+            input = &input[1..];
+            (false, true)
+        }
+        Some(b'~') => {
+            input = &input[1..];
+            (true, false)
+        }
+        _ => (false, false),
+    };
+    let Ok(string) = std::str::from_utf8(input) else {
+        todo!() // Invalid utf8
+    };
+    let Ok(mode) = u32::from_str_radix(string, 8) else {
+        todo!()
+    };
+    Ok(Mode {
+        value: mode,
+        masked,
+        keep_existing,
+    })
 }
-fn parse_user(input: Box<[u8]>) -> Result<Option<FileOwner>, ()> {
-    Ok(if &*input == b"-" {
-        None
-    } else {
-        let vec = input.into_vec();
-        let id = std::str::from_utf8(&vec)
-            .ok()
-            .and_then(|s| u32::from_str(s).ok());
-        Some(match id {
-            Some(id) => FileOwner::Id(id),
-            None => FileOwner::Name(OsString::from_vec(vec)),
-        })
+fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ()> {
+    let vec = input.into_vec();
+    let id = std::str::from_utf8(&vec)
+        .ok()
+        .and_then(|s| u32::from_str(s).ok());
+    Ok(match id {
+        Some(id) => FileOwner::Id(id),
+        None => FileOwner::Name(OsString::from_vec(vec)),
     })
 }
 
@@ -423,8 +443,18 @@ fn parse_type(input: &[u8]) -> Result<LineType, ()> {
 
 #[cfg(test)]
 mod test {
-    use crate::parser::{
-        parse_duration, parse_duration_part, MICROSECOND, NANOSECOND, SECOND, WEEK,
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+        str::FromStr,
+    };
+
+    use crate::{
+        config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
+        parser::{
+            parse_duration, parse_duration_part, parse_line, FileSpan, MICROSECOND, NANOSECOND,
+            SECOND, WEEK,
+        },
     };
 
     #[test]
@@ -446,6 +476,23 @@ mod test {
         assert_eq!(
             parse_duration("6days23hr59m59sec999ms999µs1000ns".as_bytes()),
             Ok((b"".as_slice(), WEEK))
+        );
+    }
+
+    #[test]
+    fn test_line() {
+        let dummy_file = Path::new("");
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"L+ /run/gdm/.config/pulse/default.pa - - - - /nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa", dummy_file)),
+            Ok(Line {
+                line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false }, dummy_file, 0..2 ),
+                path: Spanned::new(PathBuf::from_str("/run/gdm/.config/pulse/default.pa").unwrap(), dummy_file, 3..36),
+                mode: Spanned::new(None, dummy_file, 37..38),
+                owner: Spanned::new(None, dummy_file, 39..40),
+                group: Spanned::new(None, dummy_file, 41..42),
+                age: Spanned::new(CleanupAge::EMPTY, dummy_file, 43..44),
+                argument: Spanned::new(Some(OsString::from("/nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa")), dummy_file, 45..99)
+            })
         );
     }
 }

@@ -123,6 +123,14 @@ impl<T> Spanned<T> {
             characters: self.characters,
         })
     }
+
+    pub(crate) fn as_ref(&self) -> Spanned<&T> {
+        Spanned {
+            data: &self.data,
+            file: self.file.clone(),
+            characters: self.characters.clone(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
