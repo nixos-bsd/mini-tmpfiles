@@ -1,4 +1,9 @@
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::{
+    ffi::OsString,
+    ops::Range,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum LineAction {
@@ -90,12 +95,50 @@ impl CleanupAge {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Spanned<T> {
+    data: T,
+    file: PathBuf,
+    characters: Range<usize>,
+}
+
+impl<T> Spanned<T> {
+    pub fn new(data: T, file: &Path, characters: Range<usize>) -> Self {
+        Self {
+            data,
+            file: file.to_path_buf(),
+            characters,
+        }
+    }
+    pub fn map<U>(self, closure: impl FnOnce(T) -> U) -> Spanned<U> {
+        Spanned {
+            data: closure(self.data),
+            file: self.file,
+            characters: self.characters,
+        }
+    }
+    pub fn try_map<U, E>(self, closure: impl FnOnce(T) -> Result<U, E>) -> Result<Spanned<U>, E> {
+        Ok(Spanned {
+            data: closure(self.data)?,
+            file: self.file,
+            characters: self.characters,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Mode {
+    pub(crate) value: u32,
+    pub(crate) masked: bool, // If prefixed with a tilde, mask value with existing mode
+    pub(crate) keep_existing: bool, // If prefixed with a colon, keep existing mode if file exists
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Line {
-    pub(crate) line_type: LineType,
-    pub(crate) path: PathBuf,
-    pub(crate) mode: Option<u32>,
-    pub(crate) owner: Option<FileOwner>,
-    pub(crate) group: Option<FileOwner>,
-    pub(crate) age: CleanupAge,
-    pub(crate) argument: Option<OsString>,
+    pub(crate) line_type: Spanned<LineType>,
+    pub(crate) path: Spanned<PathBuf>,
+    pub(crate) mode: Spanned<Option<Mode>>,
+    pub(crate) owner: Spanned<Option<FileOwner>>,
+    pub(crate) group: Spanned<Option<FileOwner>>,
+    pub(crate) age: Spanned<CleanupAge>,
+    pub(crate) argument: Spanned<Option<OsString>>,
 }
