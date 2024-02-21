@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    ops::Range,
+    ops::{Deref, Range},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -124,9 +124,9 @@ impl<T> Spanned<T> {
         })
     }
 
-    pub(crate) fn as_ref(&self) -> Spanned<&T> {
+    pub(crate) fn as_deref(&self) -> Spanned<&T::Target> where T: Deref {
         Spanned {
-            data: &self.data,
+            data: self.data.deref(),
             file: self.file.clone(),
             characters: self.characters.clone(),
         }

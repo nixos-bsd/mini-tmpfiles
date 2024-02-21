@@ -6,16 +6,13 @@ use std::path::Path;
 use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 
-use nom::combinator::all_consuming;
+use nom::error::FromExternalError;
+use nom::sequence::terminated;
 use nom::{
-    bytes::complete::{tag, take_while},
-    character::{
-        complete::{digit1, one_of},
-        is_alphabetic,
-    },
-    combinator::{map_opt, map_res, opt},
-    multi::{fold_many1, many1},
-    sequence::pair,
+    bytes::complete::tag,
+    character::complete::one_of,
+    combinator::opt,
+    multi::many1,
     IResult,
 };
 use nom::{AsChar, FindToken, Finish};
@@ -79,11 +76,31 @@ static DURATION_KEYWORDS: phf::Map<&'static [u8], Duration> = phf_map! {
 };
 
 fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
-    let (input, count) = map_res(map_res(digit1, std::str::from_utf8), u64::from_str)(input)?;
-    let (input, unit) = map_opt(
-        take_while(|chr| is_alphabetic(chr) || chr >= 0x80),
-        |name| DURATION_KEYWORDS.get(name),
-    )(input)?;
+    let split_idx = input
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(input.len());
+    let (count, input2) = input.split_at(split_idx);
+    let count = u64::from_str(std::str::from_utf8(count).unwrap()).map_err(|e| {
+        nom::Err::Error(nom::error::Error::from_external_error(
+            input,
+            nom::error::ErrorKind::MapRes,
+            e,
+        ))
+    })?;
+    let input = input2;
+    let split_idx = input
+        .iter()
+        .position(|c| c.is_ascii() && !c.is_ascii_alphabetic())
+        .unwrap_or(input.len());
+    let (key, input2) = input.split_at(split_idx);
+    let unit = DURATION_KEYWORDS.get(key).ok_or_else(|| {
+        nom::Err::Error(nom::error::ParseError::from_error_kind(
+            input,
+            nom::error::ErrorKind::MapOpt,
+        ))
+    })?;
+    let input = input2;
 
     // saturating_mul is only for u32, so do it ourselves
     let total_nanos = unit.subsec_nanos() as u128 * count as u128;
@@ -98,11 +115,13 @@ fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
 }
 
 fn parse_duration(input: &[u8]) -> IResult<&[u8], Duration> {
-    fold_many1(
-        parse_duration_part,
-        Duration::default,
-        Duration::saturating_add,
-    )(input)
+    let (mut input, mut acc) = parse_duration_part(input)?;
+    while !input.is_empty() {
+        let (i, o) = parse_duration_part(input)?;
+        acc = acc.saturating_add(o);
+        input = i;
+    }
+    return Ok((b"".as_slice(), acc));
 }
 
 fn parse_cleanup_age_by(input: &[u8]) -> IResult<&[u8], CleanupAge> {
@@ -130,16 +149,10 @@ fn parse_cleanup_age_by(input: &[u8]) -> IResult<&[u8], CleanupAge> {
     Ok((input, flags))
 }
 
-fn try_optional<B: AsRef<[u8]>, T, E, F: FnOnce(B) -> Result<T, E>>(
+fn try_optional<'a, B: AsRef<[u8]> + 'a, T: 'a, E: 'a, F: FnOnce(B) -> Result<T, E> + 'a>(
     f: F,
-) -> impl FnOnce(B) -> Result<Option<T>, E> {
-    |input| {
-        if input.as_ref() == b"-" {
-            Ok(None)
-        } else {
-            f(input).map(Option::Some)
-        }
-    }
+) -> impl FnOnce(B) -> Result<Option<T>, E> + 'a {
+    |f2| optional(f)(f2).transpose()
 }
 
 fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Option<T> {
@@ -152,23 +165,21 @@ fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Opt
     }
 }
 
-fn parse_cleanup_age(input: &[u8]) -> IResult<&[u8], CleanupAge> {
-    let (input, maybe_age_by) = opt(pair(parse_cleanup_age_by, tag(b":")))(input)?;
-    let (input, duration) = parse_duration(input)?;
-
-    let mut cleanup_age = match maybe_age_by {
-        Some(result) => result.0,
-        None => CleanupAge::EMPTY,
+fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, nom::error::Error<&[u8]>> {
+    let (input, mut cleanup_age) = terminated(parse_cleanup_age_by, tag(b":"))(input).finish()?;
+    let (&[], duration) = parse_duration(input).finish()? else {
+        // parse_duration didn't consume the whole input
+        todo!()
     };
 
     cleanup_age.age = duration;
 
-    Ok((input, cleanup_age))
+    Ok(cleanup_age)
 }
 
 #[allow(unused)]
 fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
-    let line_type = take_field(&mut input)?.try_map(|field| parse_type(&field))?;
+    let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
     take_inline_whitespace(&mut input)?;
     let path = take_field(&mut input)?.map(|field| {
         let vec = field.to_vec();
@@ -176,7 +187,9 @@ fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
         PathBuf::from(os_string)
     });
     take_inline_whitespace(&mut input)?;
-    let mode = take_field(&mut input)?.try_map(|field| try_optional(parse_mode)(&field))?;
+    let mode = take_field(&mut input)?
+        .as_deref()
+        .try_map(try_optional(parse_mode))?;
     take_inline_whitespace(&mut input)?;
     let owner = take_field(&mut input)?.try_map(try_optional(parse_user))?;
     take_inline_whitespace(&mut input)?;
@@ -184,12 +197,8 @@ fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
     take_inline_whitespace(&mut input)?;
     let take_field = take_field(&mut input)?;
     let age = take_field
-        .as_ref()
-        .try_map(try_optional(|field: &Box<[u8]>| {
-            all_consuming(parse_cleanup_age)(field)
-                .finish()
-                .map(|(_, age)| age)
-        }));
+        .as_deref()
+        .try_map(try_optional(parse_cleanup_age));
     let Ok(age) = age else { todo!() };
     let age = age.map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input)?;
@@ -244,6 +253,7 @@ impl<'a> FileSpan<'a> {
     fn as_bytes(&self) -> &[u8] {
         &self.bytes[self.cursor..]
     }
+    #[cfg(test)]
     fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
         Self {
             bytes,
