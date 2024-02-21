@@ -73,6 +73,16 @@ static DURATION_KEYWORDS: phf::Map<&'static [u8], Duration> = phf_map! {
     b"" => NANOSECOND,
 };
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseError {
+    EndOfLine,
+    IllegalParseType(u8),
+    LeadingWhitespace,
+    JunkAfterQuotes,
+    EmptyParseType,
+    TrailingBackslash,
+}
+
 fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
     let split_idx = input
         .iter()
@@ -176,7 +186,10 @@ fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, nom::error::Error<&[u8]
 }
 
 #[allow(unused)]
-pub fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
+pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
+    if matches!(input.bytes.first(), Some(b' ' | b'\t')) {
+        return Err(ParseError::LeadingWhitespace);
+    }
     let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
     take_inline_whitespace(&mut input)?;
     let path = take_field(&mut input)?.map(|field| {
@@ -221,6 +234,7 @@ pub struct FileSpan<'a> {
 }
 
 impl<'a> FileSpan<'a> {
+    #[cfg(any(test, fuzzing))]
     pub fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
         Self {
             bytes,
@@ -267,18 +281,17 @@ impl<'a, 'b> SpanCursor<'a, 'b> {
     }
 }
 
-fn take_inline_whitespace(input: &mut FileSpan<'_>) -> Result<(), ()> {
+fn take_inline_whitespace(input: &mut FileSpan) -> Result<(), ParseError> {
     let mut cursor = input.cursor();
     match cursor.peek() {
         Some(b' ' | b'\t') => cursor.advance(),
-        None => todo!(),    // Empty input
-        Some(_) => todo!(), // There was zero whitespace
+        None => return Err(ParseError::EndOfLine), // Empty input
+        Some(_) => todo!(),                        // There was zero whitespace
     }
     loop {
         match cursor.peek() {
             Some(b' ' | b'\t') => cursor.advance(),
-            None => todo!(),
-            Some(_) => {
+            Some(_) | None => {
                 cursor.split_off_beginning();
                 return Ok(());
             }
@@ -286,11 +299,10 @@ fn take_inline_whitespace(input: &mut FileSpan<'_>) -> Result<(), ()> {
     }
 }
 
-fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ()> {
+fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ParseError> {
     let mut cursor = input.cursor();
     let Some(&first_char) = cursor.peek() else {
-        // Unexpected end of line
-        todo!()
+        return Err(ParseError::EndOfLine);
     };
     let mut field = Vec::new();
     let quotation = if matches!(first_char, b'\'' | b'"') {
@@ -302,21 +314,21 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ()
         // Unquoted field
     };
     loop {
-        let Some(&c) = cursor.peek() else {
-            // End of line
-            todo!()
-        };
-        match c {
-            b'\'' | b'"' if Some(c) == quotation => {
+        match cursor.peek().copied() {
+            Some(b'\'' | b'"') if cursor.peek().copied() == quotation => {
                 cursor.advance();
+                let next = cursor.peek().copied();
+                if !matches!(next, Some(b' ' | b'\t') | None) {
+                    return Err(ParseError::JunkAfterQuotes);
+                }
                 break;
             }
-            b' ' | b'\t' if quotation.is_none() => break,
-            b'\\' => {
+            Some(b' ' | b'\t') | None if quotation.is_none() => break,
+            Some(b'\\') => {
                 cursor.advance();
                 let Some(&character) = cursor.peek() else {
                     // End of line parsing escape
-                    todo!("End of input parsing escape sequence")
+                    return Err(ParseError::TrailingBackslash);
                 };
                 cursor.advance();
                 match character {
@@ -346,15 +358,19 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ()
                     b'n' => field.push(b'\n'),
                     b'r' => field.push(b'\r'),
                     b't' => field.push(b'\t'),
-                    b'\'' | b'"' | b'\\' => field.push(c),
+                    b'\'' | b'"' | b'\\' => field.push(character),
                     _ => todo!("Unrecognized escape sequence"),
                 }
             }
-            _ => {
+            Some(c) => {
                 cursor.advance();
                 field.push(c);
             }
+            None => return Err(ParseError::EndOfLine),
         }
+    }
+    if cursor.cursor == 0 {
+        todo!()
     }
     Ok(Spanned::new(
         field.into_boxed_slice(),
@@ -363,7 +379,7 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ()
     ))
 }
 
-fn parse_mode(mut input: &[u8]) -> Result<Mode, ()> {
+fn parse_mode(mut input: &[u8]) -> Result<Mode, ParseError> {
     let mode_behavior = match input.first() {
         Some(b':') => ModeBehavior::KeepExisting,
         Some(b'~') => ModeBehavior::Masked,
@@ -383,7 +399,7 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ()> {
         mode_behavior,
     })
 }
-fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ()> {
+fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ParseError> {
     let vec = input.into_vec();
     let id = std::str::from_utf8(&vec)
         .ok()
@@ -394,9 +410,10 @@ fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ()> {
     })
 }
 
-fn parse_type(input: &[u8]) -> Result<LineType, ()> {
-    let Some(char) = input.first() else { todo!() };
-    let char = char.as_char();
+fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
+    let Some(&char) = input.first() else {
+        return Err(ParseError::EmptyParseType);
+    };
     let Some(modifiers) = input.get(1..) else {
         todo!()
     };
@@ -406,7 +423,7 @@ fn parse_type(input: &[u8]) -> Result<LineType, ()> {
     let equals = modifiers.find_token('=');
     let tilde = modifiers.find_token('~');
     let caret = modifiers.find_token('^');
-    let action = match char {
+    let action = match char.as_char() {
         'f' => LineAction::CreateFile,
         'w' => LineAction::WriteFile,
         'd' | 'v' | 'q' | 'Q' => LineAction::CreateAndCleanUpDirectory,
@@ -429,10 +446,13 @@ fn parse_type(input: &[u8]) -> Result<LineType, ()> {
         'H' => LineAction::SetAttrRecursive,
         'a' => LineAction::SetAcl,
         'A' => LineAction::SetAclRecursive,
-        _ => todo!(),
+        _ => return Err(ParseError::IllegalParseType(char)),
     };
     let recreate = if plus {
-        if matches!(char, 'f' | 'w' | 'p' | 'L' | 'c' | 'b' | 'C' | 'a' | 'A') {
+        if matches!(
+            char.as_char(),
+            'f' | 'w' | 'p' | 'L' | 'c' | 'b' | 'C' | 'a' | 'A'
+        ) {
             true
         } else {
             // error
@@ -467,8 +487,8 @@ mod test {
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
         parser::{
-            parse_duration, parse_duration_part, parse_line, FileSpan, MICROSECOND, NANOSECOND,
-            SECOND, WEEK,
+            parse_duration, parse_duration_part, parse_line, FileSpan, ParseError, MICROSECOND,
+            NANOSECOND, SECOND, WEEK,
         },
     };
 
@@ -509,5 +529,49 @@ mod test {
                 argument: Spanned::new(Some(OsString::from("/nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa")), dummy_file, 45..99)
             })
         );
+    }
+
+    #[test]
+    fn test_empty_line() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"", Path::new(""))),
+            Err(ParseError::EndOfLine)
+        )
+    }
+
+    #[test]
+    fn test_illegal_parse_type() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"B", Path::new(""))),
+            Err(ParseError::IllegalParseType(b'B'))
+        )
+    }
+    #[test]
+    fn test_tab() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\t", Path::new(""))),
+            Err(ParseError::LeadingWhitespace)
+        )
+    }
+    #[test]
+    fn test_junk_after_quotes() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\"\"A", Path::new(""))),
+            Err(ParseError::JunkAfterQuotes)
+        )
+    }
+    #[test]
+    fn test_empty_parse_type() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\"\"", Path::new(""))),
+            Err(ParseError::EmptyParseType)
+        )
+    }
+    #[test]
+    fn test_trailing_backslash() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\\", Path::new(""))),
+            Err(ParseError::TrailingBackslash)
+        )
     }
 }

@@ -8,6 +8,8 @@ categories = ["command-line-utilities"]
 
 [lib]
 name = "mini_tmpfiles"
+test = false
+doctest = false
 
 [dependencies]
 clap = { version = "4.5.0", features = ["derive"] }
