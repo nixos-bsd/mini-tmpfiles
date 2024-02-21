@@ -6,6 +6,9 @@ authors = ["Artemis Tosini <me@artem.ist>"]
 license = "MIT"
 categories = ["command-line-utilities"]
 
+[lib]
+name = "mini_tmpfiles"
+
 [dependencies]
 clap = { version = "4.5.0", features = ["derive"] }
 nom = "7.1.3"

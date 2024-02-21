@@ -176,7 +176,7 @@ fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, nom::error::Error<&[u8]
 }
 
 #[allow(unused)]
-fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
+pub fn parse_line(mut input: FileSpan) -> Result<Line, ()> {
     let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
     take_inline_whitespace(&mut input)?;
     let path = take_field(&mut input)?.map(|field| {
@@ -221,8 +221,7 @@ pub struct FileSpan<'a> {
 }
 
 impl<'a> FileSpan<'a> {
-    #[cfg(test)]
-    fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
+    pub fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
         Self {
             bytes,
             file,
