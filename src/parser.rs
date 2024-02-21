@@ -11,7 +11,7 @@ use nom::sequence::terminated;
 use nom::{
     bytes::complete::tag, character::complete::one_of, combinator::opt, multi::many1, IResult,
 };
-use nom::{AsChar, FindToken, Finish};
+use nom::{AsChar, Finish};
 use phf::phf_map;
 
 use crate::config_file::{
@@ -81,6 +81,16 @@ pub enum ParseError {
     JunkAfterQuotes,
     EmptyParseType,
     TrailingBackslash,
+    UnrecognizedEscape(u8),
+    InvalidTypeCombination(u8, u8),
+    InvalidTypeModifier(u8),
+    InvalidMode,
+    DuplicateTypeModifier(u8),
+    IDKWhatAServiceCredentialIs,
+    UnsupportedOctalEscape,
+    InvalidCleanupAge,
+    QuoteInUnquotedField,
+    UnfinishedHexEscape,
 }
 
 fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
@@ -210,7 +220,9 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     let age = take_field
         .as_deref()
         .try_map(try_optional(parse_cleanup_age));
-    let Ok(age) = age else { todo!() };
+    let Ok(age) = age else {
+        return Err(ParseError::InvalidCleanupAge);
+    };
     let age = age.map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input)?;
     let remaining = Spanned::new(input.bytes, input.file, input.char_range);
@@ -324,6 +336,9 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                 break;
             }
             Some(b' ' | b'\t') | None if quotation.is_none() => break,
+            Some(b'\'' | b'"') if quotation.is_none() => {
+                return Err(ParseError::QuoteInUnquotedField)
+            }
             Some(b'\\') => {
                 cursor.advance();
                 let Some(&character) = cursor.peek() else {
@@ -335,7 +350,7 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                     b'x' => {
                         // Hexadecimal: \xhh
                         let Some(digits) = cursor.as_bytes().get(..2) else {
-                            todo!("End of input parsing hex escape")
+                            return Err(ParseError::UnfinishedHexEscape);
                         };
                         cursor.advance();
                         cursor.advance();
@@ -353,13 +368,13 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                     }
                     b'0'..=b'7' => {
                         // Octal: \OOO
-                        todo!("Octal escape sequences are not supported")
+                        return Err(ParseError::UnsupportedOctalEscape);
                     }
                     b'n' => field.push(b'\n'),
                     b'r' => field.push(b'\r'),
                     b't' => field.push(b'\t'),
                     b'\'' | b'"' | b'\\' => field.push(character),
-                    _ => todo!("Unrecognized escape sequence"),
+                    _ => return Err(ParseError::UnrecognizedEscape(character)),
                 }
             }
             Some(c) => {
@@ -388,11 +403,14 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ParseError> {
     if mode_behavior != ModeBehavior::Default {
         input = &input[1..];
     }
+    if !(3..=4).contains(&input.len()) {
+        return Err(ParseError::InvalidMode);
+    }
     let Ok(string) = std::str::from_utf8(input) else {
-        todo!() // Invalid utf8
+        return Err(ParseError::InvalidMode);
     };
     let Ok(mode) = u32::from_str_radix(string, 8) else {
-        todo!()
+        return Err(ParseError::InvalidMode);
     };
     Ok(Mode {
         value: mode,
@@ -417,12 +435,6 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     let Some(modifiers) = input.get(1..) else {
         todo!()
     };
-    let plus = modifiers.find_token('+');
-    let minus = modifiers.find_token('-');
-    let exclamation = modifiers.find_token('!');
-    let equals = modifiers.find_token('=');
-    let tilde = modifiers.find_token('~');
-    let caret = modifiers.find_token('^');
     let action = match char.as_char() {
         'f' => LineAction::CreateFile,
         'w' => LineAction::WriteFile,
@@ -448,6 +460,28 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
         'A' => LineAction::SetAclRecursive,
         _ => return Err(ParseError::IllegalParseType(char)),
     };
+    let mut plus = false;
+    let mut minus = false;
+    let mut exclamation = false;
+    let mut equals = false;
+    let mut tilde = false;
+    let mut caret = false;
+    for &c in modifiers {
+        let var = match c.as_char() {
+            '+' => &mut plus,
+            '-' => &mut minus,
+            '!' => &mut exclamation,
+            '=' => &mut equals,
+            '~' => &mut tilde,
+            '^' => &mut caret,
+            _ => return Err(ParseError::InvalidTypeModifier(c)),
+        };
+        if *var {
+            return Err(ParseError::DuplicateTypeModifier(c));
+        } else {
+            *var = true;
+        }
+    }
     let recreate = if plus {
         if matches!(
             char.as_char(),
@@ -455,8 +489,7 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
         ) {
             true
         } else {
-            // error
-            todo!()
+            return Err(ParseError::InvalidTypeCombination(char, b'+'));
         }
     } else {
         false
@@ -464,8 +497,9 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     let boot = exclamation;
     let noerror = minus;
     let force = equals;
-    if tilde || caret {
-        todo!()
+    let base64_decode = tilde;
+    if caret {
+        return Err(ParseError::IDKWhatAServiceCredentialIs);
     }
     Ok(LineType {
         action,
@@ -473,6 +507,7 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
         boot,
         noerror,
         force,
+        base64_decode,
     })
 }
 
@@ -520,7 +555,7 @@ mod test {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"L+ /run/gdm/.config/pulse/default.pa - - - - /nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa", dummy_file)),
             Ok(Line {
-                line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false }, dummy_file, 0..2 ),
+                line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false, base64_decode: false }, dummy_file, 0..2 ),
                 path: Spanned::new(PathBuf::from_str("/run/gdm/.config/pulse/default.pa").unwrap(), dummy_file, 3..36),
                 mode: Spanned::new(None, dummy_file, 37..38),
                 owner: Spanned::new(None, dummy_file, 39..40),
@@ -572,6 +607,62 @@ mod test {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\\", Path::new(""))),
             Err(ParseError::TrailingBackslash)
+        )
+    }
+    #[test]
+    fn test_unrecognized_escape() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\\z", Path::new(""))),
+            Err(ParseError::UnrecognizedEscape(b'z'))
+        )
+    }
+    #[test]
+    fn test_invalid_type_combination() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z+", Path::new(""))),
+            Err(ParseError::InvalidTypeCombination(b'Z', b'+'))
+        )
+    }
+    #[test]
+    fn test_invalid_type_modifier() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z\0", Path::new(""))),
+            Err(ParseError::InvalidTypeModifier(b'\0'))
+        )
+    }
+    #[test]
+    fn test_invalid_mode_string() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"z z -x", Path::new(""))),
+            Err(ParseError::InvalidMode)
+        )
+    }
+    #[test]
+    fn test_duplicate_type_modifier() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"A!!", Path::new(""))),
+            Err(ParseError::DuplicateTypeModifier(b'!'))
+        )
+    }
+    #[test]
+    fn test_unsupported_octal_null() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\\0", Path::new(""))),
+            Err(ParseError::UnsupportedOctalEscape)
+        )
+    }
+    #[test]
+    fn test_invalid_cleanup_age() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z - - - - f", Path::new(""))),
+            Err(ParseError::InvalidCleanupAge)
+        )
+    }
+    #[test]
+    fn test_unfinished_hex_escape() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\\x", Path::new(""))),
+            Err(ParseError::UnfinishedHexEscape)
         )
     }
 }

@@ -43,6 +43,8 @@ pub struct LineType {
     pub noerror: bool,
     /// Equals sign modifier, remove existing objects if they do not match
     pub force: bool,
+    /// Tilde modifier, base64_decode the argument
+    pub(crate) base64_decode: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
