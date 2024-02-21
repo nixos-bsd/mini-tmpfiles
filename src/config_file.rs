@@ -95,28 +95,31 @@ impl CleanupAge {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Spanned<T> {
+pub struct Spanned<'a, T> {
     data: T,
-    file: PathBuf,
+    file: &'a Path,
     characters: Range<usize>,
 }
 
-impl<T> Spanned<T> {
-    pub fn new(data: T, file: &Path, characters: Range<usize>) -> Self {
+impl<'a, T> Spanned<'a, T> {
+    pub fn new(data: T, file: &'a Path, characters: Range<usize>) -> Self {
         Self {
             data,
-            file: file.to_path_buf(),
+            file,
             characters,
         }
     }
-    pub fn map<U>(self, closure: impl FnOnce(T) -> U) -> Spanned<U> {
+    pub fn map<U>(self, closure: impl FnOnce(T) -> U) -> Spanned<'a, U> {
         Spanned {
             data: closure(self.data),
             file: self.file,
             characters: self.characters,
         }
     }
-    pub fn try_map<U, E>(self, closure: impl FnOnce(T) -> Result<U, E>) -> Result<Spanned<U>, E> {
+    pub fn try_map<U, E>(
+        self,
+        closure: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<Spanned<'a, U>, E> {
         Ok(Spanned {
             data: closure(self.data)?,
             file: self.file,
@@ -124,13 +127,13 @@ impl<T> Spanned<T> {
         })
     }
 
-    pub(crate) fn as_deref(&self) -> Spanned<&T::Target>
+    pub(crate) fn as_deref(&self) -> Spanned<'a, &T::Target>
     where
         T: Deref,
     {
         Spanned {
             data: self.data.deref(),
-            file: self.file.clone(),
+            file: self.file,
             characters: self.characters.clone(),
         }
     }
@@ -151,12 +154,12 @@ pub enum ModeBehavior {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Line {
-    pub(crate) line_type: Spanned<LineType>,
-    pub(crate) path: Spanned<PathBuf>,
-    pub(crate) mode: Spanned<Option<Mode>>,
-    pub(crate) owner: Spanned<Option<FileOwner>>,
-    pub(crate) group: Spanned<Option<FileOwner>>,
-    pub(crate) age: Spanned<CleanupAge>,
-    pub(crate) argument: Spanned<Option<OsString>>,
+pub struct Line<'a> {
+    pub(crate) line_type: Spanned<'a, LineType>,
+    pub(crate) path: Spanned<'a, PathBuf>,
+    pub(crate) mode: Spanned<'a, Option<Mode>>,
+    pub(crate) owner: Spanned<'a, Option<FileOwner>>,
+    pub(crate) group: Spanned<'a, Option<FileOwner>>,
+    pub(crate) age: Spanned<'a, CleanupAge>,
+    pub(crate) argument: Spanned<'a, Option<OsString>>,
 }

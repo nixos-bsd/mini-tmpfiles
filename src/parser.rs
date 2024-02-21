@@ -287,7 +287,7 @@ fn take_inline_whitespace(input: &mut FileSpan<'_>) -> Result<(), ()> {
     }
 }
 
-fn take_field(input: &mut FileSpan<'_>) -> Result<Spanned<Box<[u8]>>, ()> {
+fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ()> {
     let mut cursor = input.cursor();
     let Some(&first_char) = cursor.peek() else {
         // Unexpected end of line
