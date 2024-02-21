@@ -9,16 +9,14 @@ use std::{path::PathBuf, str::FromStr};
 use nom::error::FromExternalError;
 use nom::sequence::terminated;
 use nom::{
-    bytes::complete::tag,
-    character::complete::one_of,
-    combinator::opt,
-    multi::many1,
-    IResult,
+    bytes::complete::tag, character::complete::one_of, combinator::opt, multi::many1, IResult,
 };
 use nom::{AsChar, FindToken, Finish};
 use phf::phf_map;
 
-use crate::config_file::{CleanupAge, FileOwner, Line, LineAction, LineType, Mode, Spanned};
+use crate::config_file::{
+    CleanupAge, FileOwner, Line, LineAction, LineType, Mode, ModeBehavior, Spanned,
+};
 
 // Saturating_mul here because const trait isn't stable at time of writing
 static NANOSECOND: Duration = Duration::from_nanos(1);
@@ -220,62 +218,69 @@ pub struct FileSpan<'a> {
     bytes: &'a [u8],
     file: &'a Path,
     char_range: Range<usize>,
-    cursor: usize,
 }
 
 impl<'a> FileSpan<'a> {
-    fn peek(&self) -> Option<&u8> {
-        self.bytes.get(self.cursor)
-    }
-    fn advance(&mut self) {
-        self.cursor += 1;
-    }
-    fn next(&mut self) -> Option<u8> {
-        let byte = *self.peek()?;
-        self.advance();
-        Some(byte)
-    }
-    fn split(&mut self) -> Self {
-        let split = Self {
-            bytes: &self.bytes[..self.cursor],
-            file: self.file,
-            char_range: self.char_range.start..(self.char_range.start + self.cursor),
-            cursor: 0,
-        };
-        *self = Self {
-            bytes: &self.bytes[self.cursor..],
-            file: self.file,
-            char_range: (self.char_range.start + self.cursor)..self.char_range.end,
-            cursor: 0,
-        };
-        split
-    }
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes[self.cursor..]
-    }
     #[cfg(test)]
     fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
         Self {
             bytes,
             file,
             char_range: 0..bytes.len(),
+        }
+    }
+    fn cursor(&mut self) -> SpanCursor<'_, 'a> {
+        SpanCursor {
+            span: self,
             cursor: 0,
         }
     }
 }
 
+struct SpanCursor<'a, 'b> {
+    span: &'a mut FileSpan<'b>,
+    cursor: usize,
+}
+
+impl<'a, 'b> SpanCursor<'a, 'b> {
+    fn peek(&self) -> Option<&u8> {
+        self.span.bytes.get(self.cursor)
+    }
+    fn advance(&mut self) {
+        self.cursor += 1;
+    }
+    fn split_off_beginning(self) -> FileSpan<'b> {
+        let split = FileSpan {
+            bytes: &self.span.bytes[..self.cursor],
+            file: self.span.file,
+            char_range: self.span.char_range.start..(self.span.char_range.start + self.cursor),
+        };
+        *self.span = FileSpan {
+            bytes: &self.span.bytes[self.cursor..],
+            file: self.span.file,
+            char_range: (self.span.char_range.start + self.cursor)..self.span.char_range.end,
+        };
+        split
+    }
+
+    fn as_bytes(&self) -> &'b [u8] {
+        &self.span.bytes[self.cursor..]
+    }
+}
+
 fn take_inline_whitespace(input: &mut FileSpan<'_>) -> Result<(), ()> {
-    match input.peek() {
-        Some(b' ' | b'\t') => input.advance(),
+    let mut cursor = input.cursor();
+    match cursor.peek() {
+        Some(b' ' | b'\t') => cursor.advance(),
         None => todo!(),    // Empty input
         Some(_) => todo!(), // There was zero whitespace
     }
     loop {
-        match input.peek() {
-            Some(b' ' | b'\t') => input.advance(),
+        match cursor.peek() {
+            Some(b' ' | b'\t') => cursor.advance(),
             None => todo!(),
             Some(_) => {
-                input.split();
+                cursor.split_off_beginning();
                 return Ok(());
             }
         }
@@ -283,41 +288,46 @@ fn take_inline_whitespace(input: &mut FileSpan<'_>) -> Result<(), ()> {
 }
 
 fn take_field(input: &mut FileSpan<'_>) -> Result<Spanned<Box<[u8]>>, ()> {
-    let Some(&first_char) = input.peek() else {
+    let mut cursor = input.cursor();
+    let Some(&first_char) = cursor.peek() else {
         // Unexpected end of line
         todo!()
     };
     let mut field = Vec::new();
     let quotation = if matches!(first_char, b'\'' | b'"') {
         // We have a quoted string
-        input.next()
+        cursor.advance();
+        Some(first_char)
     } else {
         None
         // Unquoted field
     };
     loop {
-        let Some(&c) = input.peek() else {
+        let Some(&c) = cursor.peek() else {
             // End of line
             todo!()
         };
         match c {
             b'\'' | b'"' if Some(c) == quotation => {
-                input.advance();
+                cursor.advance();
                 break;
             }
             b' ' | b'\t' if quotation.is_none() => break,
             b'\\' => {
-                input.advance();
-                let Some(character) = input.next() else {
+                cursor.advance();
+                let Some(&character) = cursor.peek() else {
                     // End of line parsing escape
                     todo!("End of input parsing escape sequence")
                 };
+                cursor.advance();
                 match character {
                     b'x' => {
                         // Hexadecimal: \xhh
-                        let Some(digits) = input.as_bytes().get(..2) else {
+                        let Some(digits) = cursor.as_bytes().get(..2) else {
                             todo!("End of input parsing hex escape")
                         };
+                        cursor.advance();
+                        cursor.advance();
                         let byte = match std::str::from_utf8(digits)
                             .map_err(|_| IntErrorKind::InvalidDigit)
                             .and_then(|s| u8::from_str_radix(s, 16).map_err(|e| e.kind().clone()))
@@ -342,30 +352,27 @@ fn take_field(input: &mut FileSpan<'_>) -> Result<Spanned<Box<[u8]>>, ()> {
                 }
             }
             _ => {
-                input.advance();
+                cursor.advance();
                 field.push(c);
             }
         }
     }
     Ok(Spanned::new(
         field.into_boxed_slice(),
-        input.file,
-        input.split().char_range,
+        cursor.span.file,
+        cursor.split_off_beginning().char_range,
     ))
 }
 
 fn parse_mode(mut input: &[u8]) -> Result<Mode, ()> {
-    let (masked, keep_existing) = match input.first() {
-        Some(b':') => {
-            input = &input[1..];
-            (false, true)
-        }
-        Some(b'~') => {
-            input = &input[1..];
-            (true, false)
-        }
-        _ => (false, false),
+    let mode_behavior = match input.first() {
+        Some(b':') => ModeBehavior::KeepExisting,
+        Some(b'~') => ModeBehavior::Masked,
+        _ => ModeBehavior::Default,
     };
+    if mode_behavior != ModeBehavior::Default {
+        input = &input[1..];
+    }
     let Ok(string) = std::str::from_utf8(input) else {
         todo!() // Invalid utf8
     };
@@ -374,8 +381,7 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ()> {
     };
     Ok(Mode {
         value: mode,
-        masked,
-        keep_existing,
+        mode_behavior,
     })
 }
 fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ()> {

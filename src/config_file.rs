@@ -124,7 +124,10 @@ impl<T> Spanned<T> {
         })
     }
 
-    pub(crate) fn as_deref(&self) -> Spanned<&T::Target> where T: Deref {
+    pub(crate) fn as_deref(&self) -> Spanned<&T::Target>
+    where
+        T: Deref,
+    {
         Spanned {
             data: self.data.deref(),
             file: self.file.clone(),
@@ -136,8 +139,15 @@ impl<T> Spanned<T> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Mode {
     pub(crate) value: u32,
-    pub(crate) masked: bool, // If prefixed with a tilde, mask value with existing mode
-    pub(crate) keep_existing: bool, // If prefixed with a colon, keep existing mode if file exists
+    pub(crate) mode_behavior: ModeBehavior,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+pub enum ModeBehavior {
+    #[default]
+    Default,
+    Masked,       // If prefixed with a tilde, mask value with existing mode
+    KeepExisting, // If prefixed with a colon, keep existing mode if file exists
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
