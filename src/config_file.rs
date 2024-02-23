@@ -50,7 +50,7 @@ pub struct LineType {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum FileOwner {
     Id(u32),
-    Name(OsString),
+    Name(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]

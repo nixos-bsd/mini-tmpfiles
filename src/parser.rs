@@ -78,19 +78,34 @@ pub enum ParseError {
     EndOfLine,
     IllegalParseType(u8),
     LeadingWhitespace,
-    JunkAfterQuotes,
     EmptyParseType,
-    TrailingBackslash,
-    UnrecognizedEscape(u8),
     InvalidTypeCombination(u8, u8),
     InvalidTypeModifier(u8),
     InvalidMode,
     DuplicateTypeModifier(u8),
     IDKWhatAServiceCredentialIs,
-    UnsupportedOctalEscape,
     InvalidCleanupAge,
-    QuoteInUnquotedField,
+    InvalidUsername,
+    NullInPath,
+    FieldParseError(FieldParseError),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FieldParseError {
+    UnrecognizedEscape(u8),
+    TrailingBackslash,
     UnfinishedHexEscape,
+    UnsupportedOctalEscape,
+    QuoteInUnquotedField,
+    InvalidHexEscape,
+    JunkAfterQuotes,
+    EndOfLine,
+}
+
+impl From<FieldParseError> for ParseError {
+    fn from(value: FieldParseError) -> Self {
+        Self::FieldParseError(value)
+    }
 }
 
 fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
@@ -202,11 +217,14 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     }
     let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
     take_inline_whitespace(&mut input)?;
-    let path = take_field(&mut input)?.map(|field| {
+    let path = take_field(&mut input)?.try_map(|field| {
         let vec = field.to_vec();
+        if vec.contains(&b'\0') {
+            return Err(ParseError::NullInPath)
+        }
         let os_string = OsString::from_vec(vec);
-        PathBuf::from(os_string)
-    });
+        Ok(PathBuf::from(os_string))
+    })?;
     take_inline_whitespace(&mut input)?;
     let mode = take_field(&mut input)?
         .as_deref()
@@ -311,10 +329,10 @@ fn take_inline_whitespace(input: &mut FileSpan) -> Result<(), ParseError> {
     }
 }
 
-fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, ParseError> {
+fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, FieldParseError> {
     let mut cursor = input.cursor();
     let Some(&first_char) = cursor.peek() else {
-        return Err(ParseError::EndOfLine);
+        return Err(FieldParseError::EndOfLine);
     };
     let mut field = Vec::new();
     let quotation = if matches!(first_char, b'\'' | b'"') {
@@ -331,26 +349,26 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                 cursor.advance();
                 let next = cursor.peek().copied();
                 if !matches!(next, Some(b' ' | b'\t') | None) {
-                    return Err(ParseError::JunkAfterQuotes);
+                    Err(FieldParseError::JunkAfterQuotes)?
                 }
                 break;
             }
             Some(b' ' | b'\t') | None if quotation.is_none() => break,
             Some(b'\'' | b'"') if quotation.is_none() => {
-                return Err(ParseError::QuoteInUnquotedField)
+                return Err(FieldParseError::QuoteInUnquotedField)
             }
             Some(b'\\') => {
                 cursor.advance();
                 let Some(&character) = cursor.peek() else {
                     // End of line parsing escape
-                    return Err(ParseError::TrailingBackslash);
+                    return Err(FieldParseError::TrailingBackslash);
                 };
                 cursor.advance();
                 match character {
                     b'x' => {
                         // Hexadecimal: \xhh
                         let Some(digits) = cursor.as_bytes().get(..2) else {
-                            return Err(ParseError::UnfinishedHexEscape);
+                            return Err(FieldParseError::UnfinishedHexEscape);
                         };
                         cursor.advance();
                         cursor.advance();
@@ -360,7 +378,7 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                         {
                             Ok(byte) => byte,
                             Err(IntErrorKind::InvalidDigit) => {
-                                todo!("Invalid hex sequence parsing hex escape")
+                                return Err(FieldParseError::InvalidHexEscape)
                             }
                             _ => todo!(),
                         };
@@ -368,20 +386,20 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Pa
                     }
                     b'0'..=b'7' => {
                         // Octal: \OOO
-                        return Err(ParseError::UnsupportedOctalEscape);
+                        return Err(FieldParseError::UnsupportedOctalEscape);
                     }
                     b'n' => field.push(b'\n'),
                     b'r' => field.push(b'\r'),
                     b't' => field.push(b'\t'),
                     b'\'' | b'"' | b'\\' => field.push(character),
-                    _ => return Err(ParseError::UnrecognizedEscape(character)),
+                    _ => return Err(FieldParseError::UnrecognizedEscape(character)),
                 }
             }
             Some(c) => {
                 cursor.advance();
                 field.push(c);
             }
-            None => return Err(ParseError::EndOfLine),
+            None => Err(FieldParseError::EndOfLine)?,
         }
     }
     if cursor.cursor == 0 {
@@ -418,13 +436,13 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ParseError> {
     })
 }
 fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ParseError> {
-    let vec = input.into_vec();
-    let id = std::str::from_utf8(&vec)
-        .ok()
-        .and_then(|s| u32::from_str(s).ok());
-    Ok(match id {
-        Some(id) => FileOwner::Id(id),
-        None => FileOwner::Name(OsString::from_vec(vec)),
+    let Ok(s) = std::str::from_utf8(&input) else {
+        return Err(ParseError::InvalidUsername);
+    };
+    Ok(if let Ok(id) = u32::from_str(s) {
+        FileOwner::Id(id)
+    } else {
+        FileOwner::Name(s.to_owned())
     })
 }
 
@@ -522,8 +540,7 @@ mod test {
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
         parser::{
-            parse_duration, parse_duration_part, parse_line, FileSpan, ParseError, MICROSECOND,
-            NANOSECOND, SECOND, WEEK,
+            parse_duration, parse_duration_part, parse_line, FieldParseError, FileSpan, ParseError, MICROSECOND, NANOSECOND, SECOND, WEEK
         },
     };
 
@@ -570,7 +587,7 @@ mod test {
     fn test_empty_line() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"", Path::new(""))),
-            Err(ParseError::EndOfLine)
+            Err(FieldParseError::EndOfLine.into())
         )
     }
 
@@ -592,7 +609,7 @@ mod test {
     fn test_junk_after_quotes() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\"\"A", Path::new(""))),
-            Err(ParseError::JunkAfterQuotes)
+            Err(FieldParseError::JunkAfterQuotes.into())
         )
     }
     #[test]
@@ -606,14 +623,14 @@ mod test {
     fn test_trailing_backslash() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\\", Path::new(""))),
-            Err(ParseError::TrailingBackslash)
+            Err(FieldParseError::TrailingBackslash.into())
         )
     }
     #[test]
     fn test_unrecognized_escape() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\\z", Path::new(""))),
-            Err(ParseError::UnrecognizedEscape(b'z'))
+            Err(FieldParseError::UnrecognizedEscape(b'z').into())
         )
     }
     #[test]
@@ -648,7 +665,7 @@ mod test {
     fn test_unsupported_octal_null() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\\0", Path::new(""))),
-            Err(ParseError::UnsupportedOctalEscape)
+            Err(FieldParseError::UnsupportedOctalEscape.into())
         )
     }
     #[test]
@@ -662,7 +679,28 @@ mod test {
     fn test_unfinished_hex_escape() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"\\x", Path::new(""))),
-            Err(ParseError::UnfinishedHexEscape)
+            Err(FieldParseError::UnfinishedHexEscape.into())
+        )
+    }
+    #[test]
+    fn test_invalid_username() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z - - \\xFF", Path::new(""))),
+            Err(ParseError::InvalidUsername)
+        )
+    }
+    #[test]
+    fn test_invalid_hex_escape() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\\xgg", Path::new(""))),
+            Err(FieldParseError::InvalidHexEscape.into())
+        )
+    }
+    #[test]
+    fn test_null_in_path() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"z /\\x00", Path::new(""))),
+            Err(ParseError::NullInPath)
         )
     }
 }
