@@ -7,10 +7,7 @@ use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 
 use nom::error::FromExternalError;
-use nom::sequence::terminated;
-use nom::{
-    bytes::complete::tag, character::complete::one_of, combinator::opt, multi::many1, IResult,
-};
+use nom::{bytes::complete::tag, character::complete::one_of, combinator::opt, multi::many1};
 use nom::{AsChar, Finish};
 use phf::phf_map;
 
@@ -87,7 +84,7 @@ pub enum ParseError {
     InvalidCleanupAge,
     InvalidUsername,
     NullInPath,
-    FieldParseError(FieldParseError),
+    Field(FieldParseError),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,22 +101,18 @@ pub enum FieldParseError {
 
 impl From<FieldParseError> for ParseError {
     fn from(value: FieldParseError) -> Self {
-        Self::FieldParseError(value)
+        Self::Field(value)
     }
 }
 
-fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
+fn parse_duration_part(input: &[u8]) -> Result<(&[u8], Duration), nom::error::Error<&[u8]>> {
     let split_idx = input
         .iter()
         .position(|b| !b.is_ascii_digit())
         .unwrap_or(input.len());
     let (count, input2) = input.split_at(split_idx);
     let count = u64::from_str(std::str::from_utf8(count).unwrap()).map_err(|e| {
-        nom::Err::Error(nom::error::Error::from_external_error(
-            input,
-            nom::error::ErrorKind::MapRes,
-            e,
-        ))
+        nom::error::Error::from_external_error(input, nom::error::ErrorKind::MapRes, e)
     })?;
     let input = input2;
     let split_idx = input
@@ -128,10 +121,7 @@ fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
         .unwrap_or(input.len());
     let (key, input2) = input.split_at(split_idx);
     let unit = DURATION_KEYWORDS.get(key).ok_or_else(|| {
-        nom::Err::Error(nom::error::ParseError::from_error_kind(
-            input,
-            nom::error::ErrorKind::MapOpt,
-        ))
+        nom::error::ParseError::from_error_kind(input, nom::error::ErrorKind::MapOpt)
     })?;
     let input = input2;
 
@@ -147,19 +137,19 @@ fn parse_duration_part(input: &[u8]) -> IResult<&[u8], Duration> {
     Ok((input, Duration::new(secs, nanos)))
 }
 
-fn parse_duration(input: &[u8]) -> IResult<&[u8], Duration> {
+fn parse_duration(input: &[u8]) -> Result<Duration, nom::error::Error<&[u8]>> {
     let (mut input, mut acc) = parse_duration_part(input)?;
     while !input.is_empty() {
         let (i, o) = parse_duration_part(input)?;
         acc = acc.saturating_add(o);
         input = i;
     }
-    return Ok((b"".as_slice(), acc));
+    Ok(acc)
 }
 
-fn parse_cleanup_age_by(input: &[u8]) -> IResult<&[u8], CleanupAge> {
-    let (input, second_level_flag) = opt(tag(b"~"))(input)?;
-    let (input, chars) = many1(one_of(b"aAbBcCmM".as_slice()))(input)?;
+fn parse_cleanup_age_by(input: &[u8]) -> Result<(&[u8], CleanupAge), nom::error::Error<&[u8]>> {
+    let (input, second_level_flag) = opt(tag(b"~"))(input).finish()?;
+    let (input, chars) = many1(one_of(b"aAbBcCmM".as_slice()))(input).finish()?;
 
     let mut flags = CleanupAge {
         second_level: second_level_flag.is_some(),
@@ -199,13 +189,12 @@ fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Opt
 }
 
 fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, nom::error::Error<&[u8]>> {
-    let (input, mut cleanup_age) = terminated(parse_cleanup_age_by, tag(b":"))(input).finish()?;
-    let (&[], duration) = parse_duration(input).finish()? else {
-        // parse_duration didn't consume the whole input
-        todo!()
+    let (input, mut cleanup_age) = parse_cleanup_age_by(input)?;
+    let Some(input) = input.strip_prefix(b":") else {
+        let e = nom::error::ParseError::from_error_kind(input, nom::error::ErrorKind::Tag);
+        Err(e)?
     };
-
-    cleanup_age.age = duration;
+    cleanup_age.age = parse_duration(input)?;
 
     Ok(cleanup_age)
 }
@@ -220,7 +209,7 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     let path = take_field(&mut input)?.try_map(|field| {
         let vec = field.to_vec();
         if vec.contains(&b'\0') {
-            return Err(ParseError::NullInPath)
+            return Err(ParseError::NullInPath);
         }
         let os_string = OsString::from_vec(vec);
         Ok(PathBuf::from(os_string))
@@ -540,7 +529,8 @@ mod test {
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
         parser::{
-            parse_duration, parse_duration_part, parse_line, FieldParseError, FileSpan, ParseError, MICROSECOND, NANOSECOND, SECOND, WEEK
+            parse_duration, parse_duration_part, parse_line, FieldParseError, FileSpan, ParseError,
+            MICROSECOND, NANOSECOND, SECOND, WEEK,
         },
     };
 
@@ -559,10 +549,10 @@ mod test {
 
     #[test]
     fn test_duration() {
-        assert_eq!(parse_duration(b"1s1m"), Ok((b"".as_slice(), SECOND * 61)));
+        assert_eq!(parse_duration(b"1s1m"), Ok(SECOND * 61));
         assert_eq!(
             parse_duration("6days23hr59m59sec999ms999µs1000ns".as_bytes()),
-            Ok((b"".as_slice(), WEEK))
+            Ok(WEEK)
         );
     }
 
