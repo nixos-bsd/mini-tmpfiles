@@ -1,14 +1,11 @@
 use std::ffi::OsString;
-use std::num::IntErrorKind;
+use std::num::{IntErrorKind, ParseIntError};
 use std::ops::Range;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 
-use nom::error::FromExternalError;
-use nom::{bytes::complete::tag, character::complete::one_of, combinator::opt, multi::many1};
-use nom::{AsChar, Finish};
 use phf::phf_map;
 
 use crate::config_file::{
@@ -35,23 +32,30 @@ static YEAR: Duration = DAY
     .saturating_add(HOUR.saturating_mul(6));
 
 static DURATION_KEYWORDS: phf::Map<&'static [u8], Duration> = phf_map! {
+    b"nsec" => NANOSECOND,
+    b"ns" => NANOSECOND,
+    b"usec" => MICROSECOND,
+    b"us" => MICROSECOND,
+    b"\xcd\xbcs" => MICROSECOND, // μs U+03bc GREEK LETTER MU
+    b"\xc2\xb5s" => MICROSECOND, // µs U+b5 MICRO SIGN
+    b"msec" => MILLISECOND,
+    b"ms" => MILLISECOND,
     b"seconds" => SECOND,
     b"second" => SECOND,
     b"sec" => SECOND,
     b"s" => SECOND,
+    b"" => SECOND,
     b"minutes" => MINUTE,
     b"minute" => MINUTE,
     b"min" => MINUTE,
-    b"months" => MONTH,
-    b"month" => MONTH,
-    b"M" => MONTH,
-    b"msec" => MILLISECOND,
-    b"ms" => MILLISECOND,
     b"m" => MINUTE,
     b"hours" => HOUR,
     b"hour" => HOUR,
     b"hr" => HOUR,
     b"h" => HOUR,
+    b"months" => MONTH,
+    b"month" => MONTH,
+    b"M" => MONTH,
     b"days" => DAY,
     b"day" => DAY,
     b"d" => DAY,
@@ -61,13 +65,6 @@ static DURATION_KEYWORDS: phf::Map<&'static [u8], Duration> = phf_map! {
     b"years" => YEAR,
     b"year" => YEAR,
     b"y" => YEAR,
-    b"usec" => MICROSECOND,
-    b"us" => MICROSECOND,
-    b"\xcd\xbcs" => MICROSECOND, // μs U+03bc GREEK LETTER MU
-    b"\xc2\xb5s" => MICROSECOND, // µs U+b5 MICRO SIGN
-    b"nsec" => NANOSECOND,
-    b"ns" => NANOSECOND,
-    b"" => NANOSECOND,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,7 +78,7 @@ pub enum ParseError {
     InvalidMode,
     DuplicateTypeModifier(u8),
     IDKWhatAServiceCredentialIs,
-    InvalidCleanupAge,
+    InvalidCleanupAge(CleanupParseError),
     InvalidUsername,
     NullInPath,
     Field(FieldParseError),
@@ -99,31 +96,58 @@ pub enum FieldParseError {
     EndOfLine,
 }
 
+impl From<CleanupParseError> for ParseError {
+    fn from(value: CleanupParseError) -> Self {
+        Self::InvalidCleanupAge(value)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CleanupParseError {
+    InvalidDurationInt(ParseIntError),
+    InvalidDurationKeyword(Box<[u8]>),
+    DuplicateCleanupSpecifier(u8),
+    InvalidCleanupSpecifier(u8),
+    Malformed(Box<[u8]>),
+    OverflowedDuration(Box<[u8]>),
+    EmptyCleanupSpecifierList,
+}
+
 impl From<FieldParseError> for ParseError {
     fn from(value: FieldParseError) -> Self {
         Self::Field(value)
     }
 }
 
-fn parse_duration_part(input: &[u8]) -> Result<(&[u8], Duration), nom::error::Error<&[u8]>> {
-    let split_idx = input
+fn take_from_slice_while<'a>(
+    slice: &mut &'a [u8],
+    mut predicate: impl FnMut(&'a u8) -> bool,
+) -> &'a [u8] {
+    let split_idx = slice
         .iter()
-        .position(|b| !b.is_ascii_digit())
-        .unwrap_or(input.len());
-    let (count, input2) = input.split_at(split_idx);
-    let count = u64::from_str(std::str::from_utf8(count).unwrap()).map_err(|e| {
-        nom::error::Error::from_external_error(input, nom::error::ErrorKind::MapRes, e)
-    })?;
-    let input = input2;
-    let split_idx = input
-        .iter()
-        .position(|c| c.is_ascii() && !c.is_ascii_alphabetic())
-        .unwrap_or(input.len());
-    let (key, input2) = input.split_at(split_idx);
-    let unit = DURATION_KEYWORDS.get(key).ok_or_else(|| {
-        nom::error::ParseError::from_error_kind(input, nom::error::ErrorKind::MapOpt)
-    })?;
-    let input = input2;
+        .position(|b| !predicate(b))
+        .unwrap_or(slice.len());
+    let (taken, remaining) = slice.split_at(split_idx);
+    *slice = remaining;
+    taken
+}
+
+fn take_string_from_slice<'a>(slice: &mut &'a [u8], s: &str) -> Option<&'a [u8]> {
+    let remaining = slice.strip_prefix(s.as_bytes())?;
+    let taken = &slice[..s.as_bytes().len()];
+    *slice = remaining;
+    Some(taken)
+}
+
+fn parse_duration_part(input: &mut &[u8]) -> Result<Duration, CleanupParseError> {
+    let original_input = *input;
+    let count = take_from_slice_while(input, u8::is_ascii_digit);
+    let count = u64::from_str(std::str::from_utf8(count).unwrap())
+        .map_err(CleanupParseError::InvalidDurationInt)?;
+    let key = take_from_slice_while(input, |c| c.is_ascii_alphabetic() || !c.is_ascii());
+    let unit = DURATION_KEYWORDS
+        .get(key)
+        .ok_or_else(|| CleanupParseError::InvalidDurationKeyword(key.into()))?;
 
     // saturating_mul is only for u32, so do it ourselves
     let total_nanos = unit.subsec_nanos() as u128 * count as u128;
@@ -131,45 +155,55 @@ fn parse_duration_part(input: &[u8]) -> Result<(&[u8], Duration), nom::error::Er
     let extra_secs = (total_nanos / 1_000_000_000) as u64;
     let secs = unit
         .as_secs()
-        .saturating_mul(count)
-        .saturating_add(extra_secs);
+        .checked_mul(count)
+        .and_then(|secs| secs.checked_add(extra_secs))
+        .ok_or_else(|| CleanupParseError::OverflowedDuration(original_input.into()))?;
 
-    Ok((input, Duration::new(secs, nanos)))
+    Ok(Duration::new(secs, nanos))
 }
 
-fn parse_duration(input: &[u8]) -> Result<Duration, nom::error::Error<&[u8]>> {
-    let (mut input, mut acc) = parse_duration_part(input)?;
+fn parse_duration(mut input: &[u8]) -> Result<Duration, CleanupParseError> {
+    let original_input = input;
+    let mut acc = parse_duration_part(&mut input)?;
     while !input.is_empty() {
-        let (i, o) = parse_duration_part(input)?;
-        acc = acc.saturating_add(o);
-        input = i;
+        acc = acc
+            .checked_add(parse_duration_part(&mut input)?)
+            .ok_or_else(|| CleanupParseError::OverflowedDuration(original_input.into()))
+            .unwrap();
     }
     Ok(acc)
 }
 
-fn parse_cleanup_age_by(input: &[u8]) -> Result<(&[u8], CleanupAge), nom::error::Error<&[u8]>> {
-    let (input, second_level_flag) = opt(tag(b"~"))(input).finish()?;
-    let (input, chars) = many1(one_of(b"aAbBcCmM".as_slice()))(input).finish()?;
+fn parse_cleanup_age_by(mut input: &[u8]) -> Result<CleanupAge, CleanupParseError> {
+    let second_level = take_string_from_slice(&mut input, "~").is_some();
 
     let mut flags = CleanupAge {
-        second_level: second_level_flag.is_some(),
+        second_level,
         ..Default::default()
     };
-    for ch in chars {
-        match ch {
-            'a' => flags.consider_atime = true,
-            'A' => flags.consider_atime_dir = true,
-            'b' => flags.consider_btime = true,
-            'B' => flags.consider_btime_dir = true,
-            'c' => flags.consider_ctime = true,
-            'C' => flags.consider_ctime_dir = true,
-            'm' => flags.consider_mtime = true,
-            'M' => flags.consider_mtime_dir = true,
-            _ => unreachable!(),
+    if input.is_empty() {
+        Err(CleanupParseError::EmptyCleanupSpecifierList)?
+    }
+    for &ch in input {
+        let field = match ch.into() {
+            'a' => &mut flags.consider_atime,
+            'A' => &mut flags.consider_atime_dir,
+            'b' => &mut flags.consider_btime,
+            'B' => &mut flags.consider_btime_dir,
+            'c' => &mut flags.consider_ctime,
+            'C' => &mut flags.consider_ctime_dir,
+            'm' => &mut flags.consider_mtime,
+            'M' => &mut flags.consider_mtime_dir,
+            _ => Err(CleanupParseError::InvalidCleanupSpecifier(ch))?,
+        };
+        if *field {
+            Err(CleanupParseError::DuplicateCleanupSpecifier(ch))?
+        } else {
+            *field = true;
         }
     }
 
-    Ok((input, flags))
+    Ok(flags)
 }
 
 fn try_optional<'a, B: AsRef<[u8]> + 'a, T: 'a, E: 'a, F: FnOnce(B) -> Result<T, E> + 'a>(
@@ -188,13 +222,16 @@ fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Opt
     }
 }
 
-fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, nom::error::Error<&[u8]>> {
-    let (input, mut cleanup_age) = parse_cleanup_age_by(input)?;
-    let Some(input) = input.strip_prefix(b":") else {
-        let e = nom::error::ParseError::from_error_kind(input, nom::error::ErrorKind::Tag);
-        Err(e)?
-    };
-    cleanup_age.age = parse_duration(input)?;
+fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, CleanupParseError> {
+    let (mut cleanup_age, duration) =
+        match input.split(|&c| c == b':').collect::<Vec<_>>().as_slice() {
+            [] => unreachable!(),
+            &[duration] => (CleanupAge::EMPTY, duration),
+            &[cleanup_age, duration] => (parse_cleanup_age_by(cleanup_age)?, duration),
+            [..] => Err(CleanupParseError::Malformed(input.into()))?,
+        };
+
+    cleanup_age.age = parse_duration(duration)?;
 
     Ok(cleanup_age)
 }
@@ -226,10 +263,7 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     let take_field = take_field(&mut input)?;
     let age = take_field
         .as_deref()
-        .try_map(try_optional(parse_cleanup_age));
-    let Ok(age) = age else {
-        return Err(ParseError::InvalidCleanupAge);
-    };
+        .try_map(try_optional(parse_cleanup_age))?;
     let age = age.map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input)?;
     let remaining = Spanned::new(input.bytes, input.file, input.char_range);
@@ -442,7 +476,7 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     let Some(modifiers) = input.get(1..) else {
         todo!()
     };
-    let action = match char.as_char() {
+    let action = match char::from(char) {
         'f' => LineAction::CreateFile,
         'w' => LineAction::WriteFile,
         'd' | 'v' | 'q' | 'Q' => LineAction::CreateAndCleanUpDirectory,
@@ -474,13 +508,13 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     let mut tilde = false;
     let mut caret = false;
     for &c in modifiers {
-        let var = match c.as_char() {
-            '+' => &mut plus,
-            '-' => &mut minus,
-            '!' => &mut exclamation,
-            '=' => &mut equals,
-            '~' => &mut tilde,
-            '^' => &mut caret,
+        let var = match c {
+            b'+' => &mut plus,
+            b'-' => &mut minus,
+            b'!' => &mut exclamation,
+            b'=' => &mut equals,
+            b'~' => &mut tilde,
+            b'^' => &mut caret,
             _ => return Err(ParseError::InvalidTypeModifier(c)),
         };
         if *var {
@@ -491,7 +525,7 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     }
     let recreate = if plus {
         if matches!(
-            char.as_char(),
+            char.into(),
             'f' | 'w' | 'p' | 'L' | 'c' | 'b' | 'C' | 'a' | 'A'
         ) {
             true
@@ -529,21 +563,18 @@ mod test {
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
         parser::{
-            parse_duration, parse_duration_part, parse_line, FieldParseError, FileSpan, ParseError,
-            MICROSECOND, NANOSECOND, SECOND, WEEK,
+            parse_cleanup_age, parse_duration, parse_duration_part, parse_line, CleanupParseError,
+            FieldParseError, FileSpan, ParseError, MICROSECOND, SECOND, WEEK,
         },
     };
 
     #[test]
     fn test_duration_part() {
-        assert_eq!(parse_duration_part(b"1s"), Ok((b"".as_slice(), SECOND)));
+        assert_eq!(parse_duration_part(&mut b"1s".as_slice()), Ok(SECOND));
+        assert_eq!(parse_duration_part(&mut "1µs".as_bytes()), Ok(MICROSECOND));
         assert_eq!(
-            parse_duration_part("1µs".as_bytes()),
-            Ok((b"".as_slice(), MICROSECOND))
-        );
-        assert_eq!(
-            parse_duration_part("123456789".as_bytes()),
-            Ok((b"".as_slice(), NANOSECOND * 123_456_789))
+            parse_duration_part(&mut "123456789".as_bytes()),
+            Ok(SECOND * 123_456_789)
         );
     }
 
@@ -553,6 +584,20 @@ mod test {
         assert_eq!(
             parse_duration("6days23hr59m59sec999ms999µs1000ns".as_bytes()),
             Ok(WEEK)
+        );
+        assert_eq!(
+            parse_cleanup_age(b"1s1m"),
+            Ok(CleanupAge {
+                age: SECOND * 61,
+                ..CleanupAge::EMPTY
+            })
+        );
+        assert_eq!(
+            parse_cleanup_age("6days23hr59m59sec999ms999µs1000ns".as_bytes()),
+            Ok(CleanupAge {
+                age: WEEK,
+                ..CleanupAge::EMPTY
+            })
         );
     }
 
@@ -662,7 +707,9 @@ mod test {
     fn test_invalid_cleanup_age() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"Z - - - - f", Path::new(""))),
-            Err(ParseError::InvalidCleanupAge)
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::InvalidDurationInt(u64::from_str("").unwrap_err())
+            ))
         )
     }
     #[test]
@@ -691,6 +738,54 @@ mod test {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"z /\\x00", Path::new(""))),
             Err(ParseError::NullInPath)
+        )
+    }
+    #[test]
+    fn test_invalid_cleanup_specifier() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z / -	- - \0:", Path::new(""))),
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::InvalidCleanupSpecifier(b'\0')
+            ))
+        )
+    }
+    #[test]
+    fn test_duplicate_cleanup_specifier() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z / -	- - AA:", Path::new(""))),
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::DuplicateCleanupSpecifier(b'A')
+            ))
+        )
+    }
+    #[test]
+    fn test_malformed_cleanup() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z / -	- - AA::", Path::new(""))),
+            Err(ParseError::InvalidCleanupAge(CleanupParseError::Malformed(
+                b"AA::".as_slice().into()
+            )))
+        )
+    }
+    #[test]
+    fn test_overflowed_cleanup_duration() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(
+                b"Z	/ - - - 1s9999999999999month",
+                Path::new("")
+            )),
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::OverflowedDuration(b"9999999999999month".as_slice().into())
+            ))
+        )
+    }
+    #[test]
+    fn test_empty_cleanup_specifiers() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z	/ - - - :1s", Path::new(""))),
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::EmptyCleanupSpecifierList
+            ))
         )
     }
 }
