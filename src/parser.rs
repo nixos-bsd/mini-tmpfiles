@@ -3,13 +3,14 @@ use std::num::{IntErrorKind, ParseIntError};
 use std::ops::Range;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
-use std::{path::PathBuf, str::FromStr};
 
 use phf::phf_map;
 
 use crate::config_file::{
-    CleanupAge, FileOwner, Line, LineAction, LineType, Mode, ModeBehavior, Spanned,
+    CleanupAge, FileOwner, Line, LineAction, LineType, Mode, ModeBehavior, Spanned, Specifier,
+    SpecifierString,
 };
 
 // Saturating_mul here because const trait isn't stable at time of writing
@@ -82,6 +83,10 @@ pub enum ParseError {
     InvalidUsername,
     NullInPath,
     Field(FieldParseError),
+    NonabsolutePath,
+    InvalidSpecifier(u8),
+    EmptyPath,
+    IncompleteSpecifier,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -168,8 +173,7 @@ fn parse_duration(mut input: &[u8]) -> Result<Duration, CleanupParseError> {
     while !input.is_empty() {
         acc = acc
             .checked_add(parse_duration_part(&mut input)?)
-            .ok_or_else(|| CleanupParseError::OverflowedDuration(original_input.into()))
-            .unwrap();
+            .ok_or_else(|| CleanupParseError::OverflowedDuration(original_input.into()))?;
     }
     Ok(acc)
 }
@@ -236,6 +240,57 @@ fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, CleanupParseError> {
     Ok(cleanup_age)
 }
 
+fn parse_specifiers(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
+    Ok(if input.contains(&b'%') {
+        let mut input = &*input;
+        let leading = take_from_slice_while(&mut input, |&ch| ch != b'%');
+        let mut sections = Vec::new();
+        while !input.is_empty() {
+            assert!(take_string_from_slice(&mut input, "%").is_some());
+            let Some((&head, tail)) = input.split_first() else {
+                Err(ParseError::IncompleteSpecifier)?
+            };
+            let specifier =
+                Specifier::parse(head).ok_or_else(|| ParseError::InvalidSpecifier(head))?;
+            input = tail;
+            let next_segment = take_from_slice_while(&mut input, |&ch| ch != b'%').into();
+            sections.push((specifier, next_segment));
+        }
+        SpecifierString(leading.to_owned(), sections.into_boxed_slice())
+    } else {
+        SpecifierString(input.into_vec(), [].into())
+    })
+}
+
+fn parse_path(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
+    let string = parse_specifiers(input)?;
+    if string.0.contains(&b'\0') || string.1.iter().any(|(_, segment)| segment.contains(&b'\0')) {
+        Err(ParseError::NullInPath)?
+    } else if string.0.starts_with(b"/") {
+        Ok(string)
+    } else if !string.0.is_empty() {
+        Err(ParseError::NonabsolutePath)?
+    } else {
+        let Some(initial_specifier) = string.1.first() else {
+            Err(ParseError::EmptyPath)?
+        };
+        if matches!(
+            initial_specifier.0,
+            Specifier::CacheDir
+                | Specifier::UserHome
+                | Specifier::LogDir
+                | Specifier::StateDir
+                | Specifier::RuntimeDir
+                | Specifier::TempDir
+                | Specifier::PersistentTempDir
+        ) {
+            Ok(string)
+        } else {
+            Err(ParseError::NonabsolutePath)?
+        }
+    }
+}
+
 #[allow(unused)]
 pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     if matches!(input.bytes.first(), Some(b' ' | b'\t')) {
@@ -243,14 +298,7 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     }
     let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
     take_inline_whitespace(&mut input)?;
-    let path = take_field(&mut input)?.try_map(|field| {
-        let vec = field.to_vec();
-        if vec.contains(&b'\0') {
-            return Err(ParseError::NullInPath);
-        }
-        let os_string = OsString::from_vec(vec);
-        Ok(PathBuf::from(os_string))
-    })?;
+    let path = take_field(&mut input)?.try_map(parse_path)?;
     take_inline_whitespace(&mut input)?;
     let mode = take_field(&mut input)?
         .as_deref()
@@ -554,14 +602,10 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        ffi::OsString,
-        path::{Path, PathBuf},
-        str::FromStr,
-    };
+    use std::{ffi::OsString, path::Path, str::FromStr};
 
     use crate::{
-        config_file::{CleanupAge, Line, LineAction, LineType, Spanned},
+        config_file::{CleanupAge, Line, LineAction, LineType, Spanned, SpecifierString},
         parser::{
             parse_cleanup_age, parse_duration, parse_duration_part, parse_line, CleanupParseError,
             FieldParseError, FileSpan, ParseError, MICROSECOND, SECOND, WEEK,
@@ -608,7 +652,7 @@ mod test {
             parse_line(FileSpan::from_slice(b"L+ /run/gdm/.config/pulse/default.pa - - - - /nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa", dummy_file)),
             Ok(Line {
                 line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false, base64_decode: false }, dummy_file, 0..2 ),
-                path: Spanned::new(PathBuf::from_str("/run/gdm/.config/pulse/default.pa").unwrap(), dummy_file, 3..36),
+                path: Spanned::new(SpecifierString(b"/run/gdm/.config/pulse/default.pa".to_vec(), [].into()), dummy_file, 3..36),
                 mode: Spanned::new(None, dummy_file, 37..38),
                 owner: Spanned::new(None, dummy_file, 39..40),
                 group: Spanned::new(None, dummy_file, 41..42),
@@ -685,7 +729,7 @@ mod test {
     #[test]
     fn test_invalid_mode_string() {
         assert_eq!(
-            parse_line(FileSpan::from_slice(b"z z -x", Path::new(""))),
+            parse_line(FileSpan::from_slice(b"z /z -x", Path::new(""))),
             Err(ParseError::InvalidMode)
         )
     }
@@ -706,7 +750,7 @@ mod test {
     #[test]
     fn test_invalid_cleanup_age() {
         assert_eq!(
-            parse_line(FileSpan::from_slice(b"Z - - - - f", Path::new(""))),
+            parse_line(FileSpan::from_slice(b"Z /A - - - f", Path::new(""))),
             Err(ParseError::InvalidCleanupAge(
                 CleanupParseError::InvalidDurationInt(u64::from_str("").unwrap_err())
             ))
@@ -722,7 +766,7 @@ mod test {
     #[test]
     fn test_invalid_username() {
         assert_eq!(
-            parse_line(FileSpan::from_slice(b"Z - - \\xFF", Path::new(""))),
+            parse_line(FileSpan::from_slice(b"Z /A - \\xFF", Path::new(""))),
             Err(ParseError::InvalidUsername)
         )
     }
@@ -780,6 +824,22 @@ mod test {
         )
     }
     #[test]
+    fn test_overflowed_cleanup_duration_sum() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(
+                b"Z	/	-	)	-	9999999199999999915s9999999199999999198s9999",
+                Path::new("")
+            )),
+            Err(ParseError::InvalidCleanupAge(
+                CleanupParseError::OverflowedDuration(
+                    b"9999999199999999915s9999999199999999198s9999"
+                        .as_slice()
+                        .into()
+                )
+            ))
+        )
+    }
+    #[test]
     fn test_empty_cleanup_specifiers() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"Z	/ - - - :1s", Path::new(""))),
@@ -787,5 +847,48 @@ mod test {
                 CleanupParseError::EmptyCleanupSpecifierList
             ))
         )
+    }
+    #[test]
+    fn test_nonabsolute_path() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z	AAA", Path::new(""))),
+            Err(ParseError::NonabsolutePath)
+        )
+    }
+    #[test]
+    fn test_empty_path() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z	\"\"", Path::new(""))),
+            Err(ParseError::EmptyPath)
+        )
+    }
+    #[test]
+    fn test_incomplete_specifier_path() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"Z	%", Path::new(""))),
+            Err(ParseError::IncompleteSpecifier)
+        )
+    }
+    #[test]
+    fn test_path_leading_specifiers() {
+        let passes = b"ChLStTV";
+        let fails = b"aAbBgGHmMouUvwW%";
+        let path = Path::new("");
+        for pass in passes {
+            let mut slice = b"Z %".to_vec();
+            slice.push(*pass);
+            assert_ne!(
+                parse_line(FileSpan::from_slice(&slice, path)),
+                Err(ParseError::NonabsolutePath)
+            )
+        }
+        for fail in fails {
+            let mut slice = b"Z %".to_vec();
+            slice.push(*fail);
+            assert_eq!(
+                parse_line(FileSpan::from_slice(b"Z	%b", path)),
+                Err(ParseError::NonabsolutePath)
+            )
+        }
     }
 }
