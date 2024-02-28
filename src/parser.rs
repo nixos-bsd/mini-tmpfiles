@@ -70,7 +70,6 @@ static DURATION_KEYWORDS: phf::Map<&'static [u8], Duration> = phf_map! {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
-    EndOfLine,
     IllegalParseType(u8),
     LeadingWhitespace,
     EmptyParseType,
@@ -217,13 +216,7 @@ fn try_optional<'a, B: AsRef<[u8]> + 'a, T: 'a, E: 'a, F: FnOnce(B) -> Result<T,
 }
 
 fn optional<B: AsRef<[u8]>, T, F: FnOnce(B) -> T>(f: F) -> impl FnOnce(B) -> Option<T> {
-    |input| {
-        if input.as_ref() == b"-" {
-            None
-        } else {
-            Some(f(input))
-        }
-    }
+    |input| (input.as_ref() != b"-").then(|| f(input))
 }
 
 fn parse_cleanup_age(input: &[u8]) -> Result<CleanupAge, CleanupParseError> {
@@ -297,23 +290,22 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
         return Err(ParseError::LeadingWhitespace);
     }
     let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
-    take_inline_whitespace(&mut input)?;
+    take_inline_whitespace(&mut input);
     let path = take_field(&mut input)?.try_map(parse_path)?;
-    take_inline_whitespace(&mut input)?;
+    take_inline_whitespace(&mut input);
     let mode = take_field(&mut input)?
         .as_deref()
         .try_map(try_optional(parse_mode))?;
-    take_inline_whitespace(&mut input)?;
+    take_inline_whitespace(&mut input);
     let owner = take_field(&mut input)?.try_map(try_optional(parse_user))?;
-    take_inline_whitespace(&mut input)?;
+    take_inline_whitespace(&mut input);
     let group = take_field(&mut input)?.try_map(try_optional(parse_user))?;
-    take_inline_whitespace(&mut input)?;
-    let take_field = take_field(&mut input)?;
-    let age = take_field
+    take_inline_whitespace(&mut input);
+    let age = take_field(&mut input)?
         .as_deref()
-        .try_map(try_optional(parse_cleanup_age))?;
-    let age = age.map(|age| age.unwrap_or(CleanupAge::EMPTY));
-    take_inline_whitespace(&mut input)?;
+        .try_map(try_optional(parse_cleanup_age))?
+        .map(|age| age.unwrap_or(CleanupAge::EMPTY));
+    take_inline_whitespace(&mut input);
     let remaining = Spanned::new(input.bytes, input.file, input.char_range);
     let argument = remaining.map(optional(|bytes: &[u8]| OsString::from_vec(bytes.to_vec())));
 
@@ -357,8 +349,8 @@ struct SpanCursor<'a, 'b> {
 }
 
 impl<'a, 'b> SpanCursor<'a, 'b> {
-    fn peek(&self) -> Option<&u8> {
-        self.span.bytes.get(self.cursor)
+    fn peek(&self) -> Option<u8> {
+        self.span.bytes.get(self.cursor).copied()
     }
     fn advance(&mut self) {
         self.cursor += 1;
@@ -382,43 +374,32 @@ impl<'a, 'b> SpanCursor<'a, 'b> {
     }
 }
 
-fn take_inline_whitespace(input: &mut FileSpan) -> Result<(), ParseError> {
+fn take_inline_whitespace(input: &mut FileSpan) {
     let mut cursor = input.cursor();
-    match cursor.peek() {
-        Some(b' ' | b'\t') => cursor.advance(),
-        None => return Err(ParseError::EndOfLine), // Empty input
-        Some(_) => todo!(),                        // There was zero whitespace
+    while let Some(b' ' | b'\t') = cursor.peek() {
+        cursor.advance();
     }
-    loop {
-        match cursor.peek() {
-            Some(b' ' | b'\t') => cursor.advance(),
-            Some(_) | None => {
-                cursor.split_off_beginning();
-                return Ok(());
-            }
-        }
-    }
+    cursor.split_off_beginning();
 }
 
 fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, FieldParseError> {
     let mut cursor = input.cursor();
-    let Some(&first_char) = cursor.peek() else {
-        return Err(FieldParseError::EndOfLine);
+    let quotation = match cursor.peek() {
+        quote @ Some(b'\'' | b'"') => {
+            // We have a quoted string
+            cursor.advance();
+            quote
+        }
+        // Unquoted field
+        Some(_) => None,
+        None => Err(FieldParseError::EndOfLine)?,
     };
     let mut field = Vec::new();
-    let quotation = if matches!(first_char, b'\'' | b'"') {
-        // We have a quoted string
-        cursor.advance();
-        Some(first_char)
-    } else {
-        None
-        // Unquoted field
-    };
     loop {
-        match cursor.peek().copied() {
-            Some(b'\'' | b'"') if cursor.peek().copied() == quotation => {
+        match cursor.peek() {
+            Some(b'\'' | b'"') if cursor.peek() == quotation => {
                 cursor.advance();
-                let next = cursor.peek().copied();
+                let next = cursor.peek();
                 if !matches!(next, Some(b' ' | b'\t') | None) {
                     Err(FieldParseError::JunkAfterQuotes)?
                 }
@@ -426,44 +407,37 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Fi
             }
             Some(b' ' | b'\t') | None if quotation.is_none() => break,
             Some(b'\'' | b'"') if quotation.is_none() => {
-                return Err(FieldParseError::QuoteInUnquotedField)
+                Err(FieldParseError::QuoteInUnquotedField)?
             }
             Some(b'\\') => {
                 cursor.advance();
-                let Some(&character) = cursor.peek() else {
+                let Some(character) = cursor.peek() else {
                     // End of line parsing escape
-                    return Err(FieldParseError::TrailingBackslash);
+                    Err(FieldParseError::TrailingBackslash)?
                 };
                 cursor.advance();
                 match character {
                     b'x' => {
                         // Hexadecimal: \xhh
                         let Some(digits) = cursor.as_bytes().get(..2) else {
-                            return Err(FieldParseError::UnfinishedHexEscape);
+                            Err(FieldParseError::UnfinishedHexEscape)?
                         };
                         cursor.advance();
                         cursor.advance();
-                        let byte = match std::str::from_utf8(digits)
-                            .map_err(|_| IntErrorKind::InvalidDigit)
-                            .and_then(|s| u8::from_str_radix(s, 16).map_err(|e| e.kind().clone()))
-                        {
-                            Ok(byte) => byte,
-                            Err(IntErrorKind::InvalidDigit) => {
-                                return Err(FieldParseError::InvalidHexEscape)
-                            }
-                            _ => todo!(),
-                        };
+                        let s = std::str::from_utf8(digits)
+                            .map_err(|_| FieldParseError::InvalidHexEscape)?;
+                        let byte = u8::from_str_radix(s, 16).map_err(|e| {
+                            assert_eq!(*e.kind(), IntErrorKind::InvalidDigit);
+                            FieldParseError::InvalidHexEscape
+                        })?;
                         field.push(byte);
                     }
-                    b'0'..=b'7' => {
-                        // Octal: \OOO
-                        return Err(FieldParseError::UnsupportedOctalEscape);
-                    }
+                    b'0'..=b'7' => Err(FieldParseError::UnsupportedOctalEscape)?, // Octal: \OOO
                     b'n' => field.push(b'\n'),
                     b'r' => field.push(b'\r'),
                     b't' => field.push(b'\t'),
                     b'\'' | b'"' | b'\\' => field.push(character),
-                    _ => return Err(FieldParseError::UnrecognizedEscape(character)),
+                    _ => Err(FieldParseError::UnrecognizedEscape(character))?,
                 }
             }
             Some(c) => {
