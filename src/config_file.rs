@@ -43,8 +43,6 @@ pub struct LineType {
     pub noerror: bool,
     /// Equals sign modifier, remove existing objects if they do not match
     pub force: bool,
-    /// Tilde modifier, base64_decode the argument
-    pub(crate) base64_decode: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -98,7 +96,7 @@ impl CleanupAge {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Spanned<'a, T> {
-    data: T,
+    pub data: T,
     file: &'a Path,
     characters: Range<usize>,
 }
@@ -128,7 +126,7 @@ impl<'a, T> Spanned<'a, T> {
             characters: self.characters,
         })
     }
-
+    #[allow(unused)]
     pub(crate) fn as_deref(&self) -> Spanned<'a, &T::Target>
     where
         T: Deref,
@@ -138,6 +136,69 @@ impl<'a, T> Spanned<'a, T> {
             file: self.file,
             characters: self.characters.clone(),
         }
+    }
+    pub(crate) fn as_ref(&self) -> Spanned<'a, &T> {
+        Spanned {
+            data: &self.data,
+            file: self.file,
+            characters: self.characters.clone(),
+        }
+    }
+}
+
+impl<'a, T, U> Spanned<'a, (T, U)> {
+    pub fn unzip(self) -> (Spanned<'a, T>, Spanned<'a, U>) {
+        (
+            Spanned {
+                data: self.data.0,
+                file: self.file,
+                characters: self.characters.clone(),
+            },
+            Spanned {
+                data: self.data.1,
+                file: self.file,
+                characters: self.characters,
+            },
+        )
+    }
+}
+
+impl<'a, T> Spanned<'a, Option<T>> {
+    pub fn try_then<U, E>(
+        self,
+        closure: impl FnOnce(T) -> Result<Option<U>, E>,
+    ) -> Result<Spanned<'a, Option<U>>, E> {
+        let data = self.data.map(closure).transpose()?.flatten();
+        Ok(Spanned {
+            data,
+            file: self.file,
+            characters: self.characters,
+        })
+    }
+    pub fn opt_map<U>(self, closure: impl FnOnce(T) -> U) -> Spanned<'a, Option<U>> {
+        let data = self.data.map(closure);
+        Spanned {
+            data,
+            file: self.file,
+            characters: self.characters,
+        }
+    }
+    pub fn try_opt_map<U, E>(
+        self,
+        closure: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<Spanned<'a, Option<U>>, E> {
+        let data = self.data.map(closure).transpose()?;
+        Ok(Spanned {
+            data,
+            file: self.file,
+            characters: self.characters,
+        })
+    }
+    pub fn as_opt_deref(&self) -> Spanned<'a, Option<&T::Target>>
+    where
+        T: Deref,
+    {
+        self.as_ref().map(Option::as_deref)
     }
 }
 
@@ -162,7 +223,7 @@ pub struct Line<'a> {
     pub(crate) mode: Spanned<'a, Option<Mode>>,
     pub(crate) owner: Spanned<'a, Option<FileOwner>>,
     pub(crate) group: Spanned<'a, Option<FileOwner>>,
-    pub(crate) age: Spanned<'a, CleanupAge>,
+    pub(crate) age: Spanned<'a, Option<CleanupAge>>,
     pub(crate) argument: Spanned<'a, Option<OsString>>,
 }
 

@@ -97,7 +97,7 @@ pub enum FieldParseError {
     QuoteInUnquotedField,
     InvalidHexEscape,
     JunkAfterQuotes,
-    EndOfLine,
+    UnfinishedQuote,
 }
 
 impl From<CleanupParseError> for ParseError {
@@ -289,25 +289,31 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     if matches!(input.bytes.first(), Some(b' ' | b'\t')) {
         return Err(ParseError::LeadingWhitespace);
     }
-    let line_type = take_field(&mut input)?.as_deref().try_map(parse_type)?;
+    let (line_type, base64_decode) = take_field(&mut input)?
+        .as_opt_deref()
+        .map(Option::unwrap_or_default)
+        .try_map(parse_type)?
+        .unzip();
     take_inline_whitespace(&mut input);
-    let path = take_field(&mut input)?.try_map(parse_path)?;
+    let path = take_field(&mut input)?
+        .map(Option::unwrap_or_default)
+        .try_map(parse_path)?;
     take_inline_whitespace(&mut input);
     let mode = take_field(&mut input)?
-        .as_deref()
-        .try_map(try_optional(parse_mode))?;
+        .as_opt_deref()
+        .try_then(try_optional(parse_mode))?;
     take_inline_whitespace(&mut input);
-    let owner = take_field(&mut input)?.try_map(try_optional(parse_user))?;
+    let owner = take_field(&mut input)?.try_then(try_optional(parse_user))?;
     take_inline_whitespace(&mut input);
-    let group = take_field(&mut input)?.try_map(try_optional(parse_user))?;
+    let group = take_field(&mut input)?.try_then(try_optional(parse_user))?;
     take_inline_whitespace(&mut input);
     let age = take_field(&mut input)?
-        .as_deref()
-        .try_map(try_optional(parse_cleanup_age))?
-        .map(|age| age.unwrap_or(CleanupAge::EMPTY));
+        .as_opt_deref()
+        .try_opt_map(try_optional(parse_cleanup_age))?
+        .opt_map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input);
-    let remaining = Spanned::new(input.bytes, input.file, input.char_range);
-    let argument = remaining.map(optional(|bytes: &[u8]| OsString::from_vec(bytes.to_vec())));
+    let argument = Spanned::new(input.bytes, input.file, input.char_range)
+        .map(|input| parse_argument(input, base64_decode.data));
 
     Ok(Line {
         line_type,
@@ -318,6 +324,16 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
         age,
         argument,
     })
+}
+
+fn parse_argument(input: &[u8], base64: bool) -> Option<OsString> {
+    if base64 {
+        todo!()
+    } else if input.is_empty() {
+        None
+    } else {
+        Some(OsString::from_vec(input.to_vec()))
+    }
 }
 
 pub struct FileSpan<'a> {
@@ -382,7 +398,9 @@ fn take_inline_whitespace(input: &mut FileSpan) {
     cursor.split_off_beginning();
 }
 
-fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, FieldParseError> {
+fn take_field<'a>(
+    input: &mut FileSpan<'a>,
+) -> Result<Spanned<'a, Option<Box<[u8]>>>, FieldParseError> {
     let mut cursor = input.cursor();
     let quotation = match cursor.peek() {
         quote @ Some(b'\'' | b'"') => {
@@ -392,12 +410,12 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Fi
         }
         // Unquoted field
         Some(_) => None,
-        None => Err(FieldParseError::EndOfLine)?,
+        None => return Ok(Spanned::new(None, input.file, input.char_range.clone())),
     };
     let mut field = Vec::new();
     loop {
         match cursor.peek() {
-            Some(b'\'' | b'"') if cursor.peek() == quotation => {
+            ch @ Some(b'\'' | b'"') if ch == quotation => {
                 cursor.advance();
                 let next = cursor.peek();
                 if !matches!(next, Some(b' ' | b'\t') | None) {
@@ -406,6 +424,7 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Fi
                 break;
             }
             Some(b' ' | b'\t') | None if quotation.is_none() => break,
+            None => Err(FieldParseError::UnfinishedQuote)?,
             Some(b'\'' | b'"') if quotation.is_none() => {
                 Err(FieldParseError::QuoteInUnquotedField)?
             }
@@ -444,14 +463,10 @@ fn take_field<'a>(input: &mut FileSpan<'a>) -> Result<Spanned<'a, Box<[u8]>>, Fi
                 cursor.advance();
                 field.push(c);
             }
-            None => Err(FieldParseError::EndOfLine)?,
         }
     }
-    if cursor.cursor == 0 {
-        todo!()
-    }
     Ok(Spanned::new(
-        field.into_boxed_slice(),
+        Some(field.into_boxed_slice()),
         cursor.span.file,
         cursor.split_off_beginning().char_range,
     ))
@@ -491,7 +506,7 @@ fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ParseError> {
     })
 }
 
-fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
+fn parse_type(input: &[u8]) -> Result<(LineType, bool), ParseError> {
     let Some(&char) = input.first() else {
         return Err(ParseError::EmptyParseType);
     };
@@ -564,14 +579,16 @@ fn parse_type(input: &[u8]) -> Result<LineType, ParseError> {
     if caret {
         return Err(ParseError::IDKWhatAServiceCredentialIs);
     }
-    Ok(LineType {
-        action,
-        recreate,
-        boot,
-        noerror,
-        force,
+    Ok((
+        LineType {
+            action,
+            recreate,
+            boot,
+            noerror,
+            force,
+        },
         base64_decode,
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -625,12 +642,12 @@ mod test {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"L+ /run/gdm/.config/pulse/default.pa - - - - /nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa", dummy_file)),
             Ok(Line {
-                line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false, base64_decode: false }, dummy_file, 0..2 ),
+                line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false }, dummy_file, 0..2 ),
                 path: Spanned::new(SpecifierString(b"/run/gdm/.config/pulse/default.pa".to_vec(), [].into()), dummy_file, 3..36),
                 mode: Spanned::new(None, dummy_file, 37..38),
                 owner: Spanned::new(None, dummy_file, 39..40),
                 group: Spanned::new(None, dummy_file, 41..42),
-                age: Spanned::new(CleanupAge::EMPTY, dummy_file, 43..44),
+                age: Spanned::new(Some(CleanupAge::EMPTY), dummy_file, 43..44),
                 argument: Spanned::new(Some(OsString::from("/nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa")), dummy_file, 45..99)
             })
         );
@@ -640,7 +657,14 @@ mod test {
     fn test_empty_line() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"", Path::new(""))),
-            Err(FieldParseError::EndOfLine.into())
+            Err(ParseError::EmptyParseType)
+        )
+    }
+    #[test]
+    fn test_unfinished_quote() {
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"\"", Path::new(""))),
+            Err(FieldParseError::UnfinishedQuote.into())
         )
     }
 
@@ -864,5 +888,35 @@ mod test {
                 Err(ParseError::NonabsolutePath)
             )
         }
+    }
+    #[test]
+    fn test_omitted_args() {
+        let file = Path::new("");
+        assert_eq!(
+            parse_line(FileSpan::from_slice(b"R! /etc/group.lock", file)),
+            Ok(Line {
+                line_type: Spanned::new(
+                    LineType {
+                        action: LineAction::RemoveRecursive,
+                        recreate: false,
+                        boot: true,
+                        noerror: false,
+                        force: false,
+                    },
+                    file,
+                    0..2
+                ),
+                path: Spanned::new(
+                    SpecifierString(b"/etc/group.lock".to_vec(), [].into()),
+                    file,
+                    3..18
+                ),
+                mode: Spanned::new(None, file, 18..18),
+                owner: Spanned::new(None, file, 18..18),
+                group: Spanned::new(None, file, 18..18),
+                age: Spanned::new(None, file, 18..18),
+                argument: Spanned::new(None, file, 18..18)
+            })
+        )
     }
 }
