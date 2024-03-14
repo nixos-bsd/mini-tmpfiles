@@ -2,17 +2,14 @@
   description = "Standalone replacement for systemd-tmpfiles";
 
   inputs = {
-    nixpkgs-freebsd.url = "github:rhelmot/nixpkgs/freebsd-staging";
-    nixpkgs-nixos.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:rhelmot/nixpkgs/freebsd-staging";
     utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs-freebsd, nixpkgs-nixos, utils }:
+  outputs = { self, nixpkgs, utils }:
     let supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-freebsd" ];
     in (utils.lib.eachSystem supportedSystems (system:
       let
-        nixpkgs =
-          if system == "x86_64-freebsd" then nixpkgs-freebsd else nixpkgs-nixos;
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ self.overlays.default ];

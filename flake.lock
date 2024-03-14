@@ -1,12 +1,12 @@
 {
   "nodes": {
-    "nixpkgs-freebsd": {
+    "nixpkgs": {
       "locked": {
-        "lastModified": 1707780748,
-        "narHash": "sha256-nGlc1r/yEv67Lh8w8rl3Y70jlEXc3NRH4ERDw7z4ceQ=",
+        "lastModified": 1710373864,
+        "narHash": "sha256-mXCd1NIqWxzu6wnbn56XHsC5qqg5zDVolQ7KBnuPj20=",
         "owner": "rhelmot",
         "repo": "nixpkgs",
-        "rev": "39ad257b0337bc76e7237b165b4aec7e44576c1b",
+        "rev": "d57152676d6cb3f4851d7beebd99c49d8ae5982d",
         "type": "github"
       },
       "original": {
@@ -16,26 +16,9 @@
         "type": "github"
       }
     },
-    "nixpkgs-nixos": {
-      "locked": {
-        "lastModified": 1707743206,
-        "narHash": "sha256-AehgH64b28yKobC/DAWYZWkJBxL/vP83vkY+ag2Hhy4=",
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "2d627a2a704708673e56346fcb13d25344b8eaf3",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nixos",
-        "ref": "nixpkgs-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
-        "nixpkgs-freebsd": "nixpkgs-freebsd",
-        "nixpkgs-nixos": "nixpkgs-nixos",
+        "nixpkgs": "nixpkgs",
         "utils": "utils"
       }
     },
