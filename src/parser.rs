@@ -6,6 +6,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+use base64::engine::Engine;
+use base64::DecodeError;
 use phf::phf_map;
 
 use crate::config_file::{
@@ -86,6 +88,13 @@ pub enum ParseError {
     InvalidSpecifier(u8),
     EmptyPath,
     IncompleteSpecifier,
+    Base64Decode(DecodeError),
+}
+
+impl From<DecodeError> for ParseError {
+    fn from(value: DecodeError) -> Self {
+        Self::Base64Decode(value)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -313,7 +322,7 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
         .opt_map(|age| age.unwrap_or(CleanupAge::EMPTY));
     take_inline_whitespace(&mut input);
     let argument = Spanned::new(input.bytes, input.file, input.char_range)
-        .map(|input| parse_argument(input, base64_decode.data));
+        .try_map(|input| parse_argument(input, base64_decode.data))?;
 
     Ok(Line {
         line_type,
@@ -326,14 +335,17 @@ pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
     })
 }
 
-fn parse_argument(input: &[u8], base64: bool) -> Option<OsString> {
-    if base64 {
-        todo!()
-    } else if input.is_empty() {
-        None
+fn parse_argument(input: &[u8], base64_decode: bool) -> Result<Option<OsString>, ParseError> {
+    Ok(if !input.is_empty() {
+        Some(if base64_decode {
+            let decoded = base64::prelude::BASE64_STANDARD.decode(input)?;
+            OsString::from_vec(decoded)
+        } else {
+            OsString::from_vec(input.to_vec())
+        })
     } else {
-        Some(OsString::from_vec(input.to_vec()))
-    }
+        None
+    })
 }
 
 pub struct FileSpan<'a> {

@@ -12,5 +12,6 @@ test = false
 doctest = false
 
 [dependencies]
+base64 = "0.22.0"
 clap = { version = "4.5.0", features = ["derive"] }
 phf = { version = "0.11.2", features = ["macros"] }
