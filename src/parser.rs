@@ -294,7 +294,7 @@ fn parse_path(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
 }
 
 #[allow(unused)]
-pub fn parse_line(mut input: FileSpan) -> Result<Line, ParseError> {
+pub fn parse_line<'b>(mut input: FileSpan<'_, 'b>) -> Result<Line<'b>, ParseError> {
     if matches!(input.bytes.first(), Some(b' ' | b'\t')) {
         return Err(ParseError::LeadingWhitespace);
     }
@@ -348,42 +348,84 @@ fn parse_argument(input: &[u8], base64_decode: bool) -> Result<Option<OsString>,
     })
 }
 
-pub struct FileSpan<'a> {
+#[derive(Clone)]
+pub struct FileSpan<'a, 'b> {
     bytes: &'a [u8],
-    file: &'a Path,
+    file: &'b Path,
     char_range: Range<usize>,
 }
 
-impl<'a> FileSpan<'a> {
-    #[cfg(any(test, fuzzing))]
-    pub fn from_slice(bytes: &'a [u8], file: &'a Path) -> Self {
+impl<'a, 'b> FileSpan<'a, 'b> {
+    pub fn from_slice(bytes: &'a [u8], file: &'b Path) -> Self {
         Self {
             bytes,
             file,
             char_range: 0..bytes.len(),
         }
     }
-    fn cursor(&mut self) -> SpanCursor<'_, 'a> {
+    pub(crate) fn cursor(&mut self) -> SpanCursor<'_, 'a, 'b> {
         SpanCursor {
             span: self,
             cursor: 0,
         }
     }
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+    pub(crate) fn take_while(&mut self, mut predicate: impl FnMut(&'a u8) -> bool) -> Self {
+        let split_idx = self
+            .bytes
+            .iter()
+            .position(|b| !predicate(b))
+            .unwrap_or(self.bytes.len());
+        let mut cursor = self.cursor();
+        cursor.advance_n(split_idx);
+        cursor.split_off_beginning()
+    }
+    pub(crate) fn lines(&self) -> Lines<'a, 'b> {
+        Lines(self.clone())
+    }
 }
 
-struct SpanCursor<'a, 'b> {
-    span: &'a mut FileSpan<'b>,
+pub(crate) struct Lines<'a, 'b>(FileSpan<'a, 'b>);
+
+impl<'a, 'b> Iterator for Lines<'a, 'b> {
+    type Item = FileSpan<'a, 'b>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.bytes().is_empty() {
+            return None;
+        }
+        let mut cursor = self.0.cursor();
+        while cursor.peek().is_some_and(|ch| ch != b'\n') {
+            cursor.advance();
+        }
+        let line = cursor.split_off_beginning();
+        if !self.0.bytes().is_empty() {
+            let mut cursor = self.0.cursor();
+            cursor.advance();
+            cursor.split_off_beginning();
+        }
+        Some(line)
+    }
+}
+
+pub(crate) struct SpanCursor<'a, 'b, 'c> {
+    span: &'a mut FileSpan<'b, 'c>,
     cursor: usize,
 }
 
-impl<'a, 'b> SpanCursor<'a, 'b> {
+impl<'b, 'c> SpanCursor<'_, 'b, 'c> {
     fn peek(&self) -> Option<u8> {
         self.span.bytes.get(self.cursor).copied()
     }
     fn advance(&mut self) {
         self.cursor += 1;
     }
-    fn split_off_beginning(self) -> FileSpan<'b> {
+    fn advance_n(&mut self, count: usize) {
+        self.cursor += count;
+    }
+    pub fn split_off_beginning(self) -> FileSpan<'b, 'c> {
         let split = FileSpan {
             bytes: &self.span.bytes[..self.cursor],
             file: self.span.file,
@@ -411,7 +453,7 @@ fn take_inline_whitespace(input: &mut FileSpan) {
 }
 
 fn take_field<'a>(
-    input: &mut FileSpan<'a>,
+    input: &mut FileSpan<'_, 'a>,
 ) -> Result<Spanned<'a, Option<Box<[u8]>>>, FieldParseError> {
     let mut cursor = input.cursor();
     let quotation = match cursor.peek() {
@@ -519,14 +561,20 @@ fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ParseError> {
 }
 
 fn parse_type(input: &[u8]) -> Result<(LineType, bool), ParseError> {
-    let Some(&char) = input.first() else {
+    let Some(&(mut char)) = input.first() else {
         return Err(ParseError::EmptyParseType);
     };
     let Some(modifiers) = input.get(1..) else {
         todo!()
     };
+    let mut plus = false;
     let action = match char::from(char) {
         'f' => LineAction::CreateFile,
+        'F' => {
+            plus = true;
+            char = b'f';
+            LineAction::CreateFile
+        }
         'w' => LineAction::WriteFile,
         'd' | 'v' | 'q' | 'Q' => LineAction::CreateAndCleanUpDirectory,
         'D' => LineAction::CreateAndRemoveDirectory,
@@ -550,7 +598,6 @@ fn parse_type(input: &[u8]) -> Result<(LineType, bool), ParseError> {
         'A' => LineAction::SetAclRecursive,
         _ => return Err(ParseError::IllegalParseType(char)),
     };
-    let mut plus = false;
     let mut minus = false;
     let mut exclamation = false;
     let mut equals = false;
