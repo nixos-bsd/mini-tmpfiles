@@ -122,6 +122,8 @@ fn create(config: &[Line]) -> eyre::Result<()> {
                             let existing_target = fs::read_link(link)?;
                             if existing_target != target {
                                 fs::remove_file(link)?;
+                            } else {
+                                continue;
                             }
                         } else {
                             todo!("Won't clobber things other than files, directories, or symlinks")
