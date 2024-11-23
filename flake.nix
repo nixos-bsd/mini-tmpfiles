@@ -1,27 +1,26 @@
 {
   description = "Standalone replacement for systemd-tmpfiles";
 
-  inputs = {
-    nixpkgs.url = "github:rhelmot/nixpkgs/freebsd-staging";
-    utils.url = "github:numtide/flake-utils";
-  };
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable-small";
 
-  outputs = { self, nixpkgs, utils }:
-    let supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-freebsd" ];
-    in (utils.lib.eachSystem supportedSystems (system:
-      let
-        pkgs = import nixpkgs {
+  outputs = { self, nixpkgs }:
+    let
+      inherit (nixpkgs) lib;
+      makePkgs = system:
+        import nixpkgs {
           inherit system;
           overlays = [ self.overlays.default ];
         };
-      in rec {
-        packages.mini-tmpfiles = pkgs.mini-tmpfiles;
-        packages.default = packages.mini-tmpfiles;
+      forAllSystems = f:
+        lib.genAttrs lib.systems.flakeExposed (system: f (makePkgs system));
+    in {
+      packages = forAllSystems (pkgs: rec {
+        inherit (pkgs) mini-tmpfiles;
+        default = mini-tmpfiles;
+      });
 
-        apps.mini-tmpfiles = utils.lib.mkApp { drv = packages.mini-tmpfiles; };
-        apps.default = apps.mini-tmpfiles;
-
-        devShells.mini-tmpfiles = with pkgs;
+      devShells = forAllSystems (pkgs: rec {
+        mini-tmpfiles = with pkgs;
           mkShell {
             packages = [
               rustPackages.cargo
@@ -31,26 +30,27 @@
             ];
             RUST_SRC_PATH = "${rustPackages.rustPlatform.rustLibSrc}";
           };
-        devShells.default = devShells.mini-tmpfiles;
+        default = mini-tmpfiles;
+      });
 
-        formatter = pkgs.nixfmt;
-      })) // {
-        overlays.default = final: prev: {
-          mini-tmpfiles = final.rustPlatform.buildRustPackage {
-            name = "mini-tmpfiles";
-            version = "0.1";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            doCheck = false;
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-classic);
 
-            meta = with final.lib; {
-              homepage = "https://github.com/nixos-bsd/mini-tmpfiles";
-              description = "Standalone replacement for systemd-tmpfiles";
-              maintainers = with maintainers; [ artemist ];
-              license = with licenses; [ mit ];
-              platforms = supportedSystems;
-            };
+      overlays.default = final: prev: {
+        mini-tmpfiles = final.rustPlatform.buildRustPackage {
+          name = "mini-tmpfiles";
+          version = "0.1";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          doCheck = false;
+
+          meta = with final.lib; {
+            homepage = "https://github.com/nixos-bsd/mini-tmpfiles";
+            description = "Standalone replacement for systemd-tmpfiles";
+            maintainers = with maintainers; [ artemist ];
+            license = with licenses; [ mit ];
+            platforms = platforms.unix;
           };
         };
       };
+    };
 }
