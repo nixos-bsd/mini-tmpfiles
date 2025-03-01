@@ -1,5 +1,8 @@
+use core::str;
 use std::{
+    borrow::Cow,
     ffi::OsString,
+    fmt::Display,
     ops::{Deref, Range},
     path::Path,
     time::Duration,
@@ -51,6 +54,54 @@ pub enum FileOwner {
     Name(String),
 }
 
+impl FileOwner {
+    pub(crate) fn as_uid(&self) -> eyre::Result<u32> {
+        match self {
+            FileOwner::Id(x) => Ok(*x),
+            FileOwner::Name(s) => Ok(users::get_user_by_name(s)
+                .ok_or(eyre::eyre!("User {} not found", s))?
+                .uid()),
+        }
+    }
+
+    pub(crate) fn as_uname(&self) -> eyre::Result<Cow<str>> {
+        match self {
+            FileOwner::Id(x) => Ok(Cow::Owned(
+                users::get_user_by_uid(*x)
+                    .ok_or(eyre::eyre!("User {} not found", x))?
+                    .name()
+                    .to_str()
+                    .ok_or(eyre::eyre!("User {} is not valid utf-8", x))?
+                    .to_owned(),
+            )),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(&s)),
+        }
+    }
+
+    pub(crate) fn as_gid(&self) -> eyre::Result<u32> {
+        match self {
+            FileOwner::Id(x) => Ok(*x),
+            FileOwner::Name(s) => Ok(users::get_group_by_name(s)
+                .ok_or(eyre::eyre!("Group {} not found", s))?
+                .gid()),
+        }
+    }
+
+    pub(crate) fn as_gname(&self) -> eyre::Result<Cow<str>> {
+        match self {
+            FileOwner::Id(x) => Ok(Cow::Owned(
+                users::get_group_by_gid(*x)
+                    .ok_or(eyre::eyre!("Group {} not found", x))?
+                    .name()
+                    .to_str()
+                    .ok_or(eyre::eyre!("Group {} is not valid utf-8", x))?
+                    .to_owned(),
+            )),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(&s)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]
 pub struct CleanupAge {
     /// Minimum age before cleaning up
@@ -97,8 +148,8 @@ impl CleanupAge {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Spanned<'a, T> {
     pub data: T,
-    file: &'a Path,
-    characters: Range<usize>,
+    pub file: &'a Path,
+    pub characters: Range<usize>,
 }
 
 impl<'a, T> Spanned<'a, T> {
@@ -274,8 +325,8 @@ impl Specifier {
             'M' => ImageID,
             'o' => OperatingSystemID,
             'S' => StateDir,
-            't' => TempDir,
             'T' => RuntimeDir,
+            't' => TempDir,
             'u' => Username,
             'U' => UserUID,
             'v' => KernelRelease,
@@ -288,5 +339,50 @@ impl Specifier {
     }
 }
 
+impl Display for Specifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "%{}",
+            match self {
+                Specifier::Architecture => "a",
+                Specifier::ImageVersion => "A",
+                Specifier::BootID => "b",
+                Specifier::BuildID => "B",
+                Specifier::CacheDir => "C",
+                Specifier::UserGroup => "g",
+                Specifier::UserGID => "G",
+                Specifier::UserHome => "h",
+                Specifier::Hostname => "H",
+                Specifier::ShortHostname => "l",
+                Specifier::LogDir => "L",
+                Specifier::MachineID => "m",
+                Specifier::ImageID => "M",
+                Specifier::OperatingSystemID => "o",
+                Specifier::StateDir => "S",
+                Specifier::RuntimeDir => "T",
+                Specifier::TempDir => "t",
+                Specifier::Username => "u",
+                Specifier::UserUID => "U",
+                Specifier::KernelRelease => "v",
+                Specifier::PersistentTempDir => "V",
+                Specifier::VersionID => "w",
+                Specifier::VariantID => "W",
+                Specifier::PercentSign => "%",
+            }
+        )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpecifierString(pub Vec<u8>, pub Box<[(Specifier, Vec<u8>)]>);
+
+impl Display for SpecifierString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", str::from_utf8(&self.0).unwrap())?;
+        for (spec, string) in &self.1 {
+            write!(f, "{}{}", spec, str::from_utf8(string).unwrap())?
+        }
+        Ok(())
+    }
+}
