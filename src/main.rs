@@ -119,7 +119,9 @@ fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
                 buf.push(piece);
                 if check {
                     match fs::symlink_metadata(&buf) {
-                        Ok(m) => if !m.is_dir() {},
+                        Ok(m) => if !m.is_dir() {
+                            Err(eyre::eyre!("A parent directory is not a directory"))?
+                        },
                         Err(e) => match e.kind() {
                             io::ErrorKind::NotFound => {
                                 match fs::DirBuilder::new().mode(0o755).create(&buf) {
