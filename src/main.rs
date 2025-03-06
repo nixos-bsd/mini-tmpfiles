@@ -2,7 +2,7 @@ mod config_file;
 mod parser;
 
 use clap::Parser;
-use config_file::{Line, Mode, ModeBehavior};
+use config_file::Line;
 use eyre::Context;
 use std::{
     collections::BTreeMap,
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     for err in e.chain() {
                         eprint!(": {}", err);
                     }
-                    eprintln!("");
+                    eprintln!();
                 }
             }
         }

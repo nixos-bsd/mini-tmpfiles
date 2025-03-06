@@ -74,7 +74,7 @@ impl FileOwner {
                     .ok_or(eyre::eyre!("User {} is not valid utf-8", x))?
                     .to_owned(),
             )),
-            FileOwner::Name(s) => Ok(Cow::Borrowed(&s)),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
         }
     }
 
@@ -97,7 +97,7 @@ impl FileOwner {
                     .ok_or(eyre::eyre!("Group {} is not valid utf-8", x))?
                     .to_owned(),
             )),
-            FileOwner::Name(s) => Ok(Cow::Borrowed(&s)),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
         }
     }
 }
