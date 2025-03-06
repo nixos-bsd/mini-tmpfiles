@@ -59,7 +59,7 @@ impl FileOwner {
     pub(crate) fn as_uid(&self) -> eyre::Result<u32> {
         match self {
             FileOwner::Id(x) => Ok(*x),
-            FileOwner::Name(s) => Ok(users::get_user_by_name(s)
+            FileOwner::Name(s) => Ok(uzers::get_user_by_name(s)
                 .ok_or_else(|| eyre::eyre!("User {s} not found"))?
                 .uid()),
         }
@@ -68,7 +68,7 @@ impl FileOwner {
     pub(crate) fn as_uname(&self) -> eyre::Result<Cow<str>> {
         match self {
             FileOwner::Id(x) => Ok(Cow::Owned(
-                users::get_user_by_uid(*x)
+                uzers::get_user_by_uid(*x)
                     .ok_or_else(|| eyre::eyre!("User {x} not found"))?
                     .name()
                     .to_str()
@@ -82,7 +82,7 @@ impl FileOwner {
     pub(crate) fn as_gid(&self) -> eyre::Result<u32> {
         match self {
             FileOwner::Id(x) => Ok(*x),
-            FileOwner::Name(s) => Ok(users::get_group_by_name(s)
+            FileOwner::Name(s) => Ok(uzers::get_group_by_name(s)
                 .ok_or_else(|| eyre::eyre!("Group {s} not found"))?
                 .gid()),
         }
@@ -91,7 +91,7 @@ impl FileOwner {
     pub(crate) fn as_gname(&self) -> eyre::Result<Cow<str>> {
         match self {
             FileOwner::Id(x) => Ok(Cow::Owned(
-                users::get_group_by_gid(*x)
+                uzers::get_group_by_gid(*x)
                     .ok_or_else(|| eyre::eyre!("Group {x} not found"))?
                     .name()
                     .to_str()
