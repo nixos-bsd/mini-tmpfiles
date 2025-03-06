@@ -258,26 +258,29 @@ fn parse_specifiers(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
             let next_segment = take_from_slice_while(&mut input, |&ch| ch != b'%').into();
             sections.push((specifier, next_segment));
         }
-        SpecifierString(leading.to_owned(), sections.into_boxed_slice())
+        SpecifierString::new(leading.into(), sections.into_boxed_slice())
     } else {
-        SpecifierString(input.into_vec(), [].into())
+        SpecifierString::new_without_specifiers(input)
     })
 }
 
 fn parse_path(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
     let string = parse_specifiers(input)?;
-    if string.0.contains(&b'\0') || string.1.iter().any(|(_, segment)| segment.contains(&b'\0')) {
+    if string
+        .components_iter()
+        .any(|component| component.contains(&b'\0'))
+    {
         Err(ParseError::NullInPath)?
-    } else if string.0.starts_with(b"/") {
+    } else if string.first_component().starts_with(b"/") {
         Ok(string)
-    } else if !string.0.is_empty() {
+    } else if !string.first_component().is_empty() {
         Err(ParseError::NonabsolutePath)?
     } else {
-        let Some(initial_specifier) = string.1.first() else {
+        let Some(initial_specifier) = string.specifier_iter().next() else {
             Err(ParseError::EmptyPath)?
         };
         if matches!(
-            initial_specifier.0,
+            initial_specifier,
             Specifier::CacheDir
                 | Specifier::UserHome
                 | Specifier::LogDir
@@ -702,7 +705,7 @@ mod test {
             parse_line(FileSpan::from_slice(b"L+ /run/gdm/.config/pulse/default.pa - - - - /nix/store/whibfps24g91fx9i63m2wdyl87dfadnn-default.pa", dummy_file)),
             Ok(Line {
                 line_type: Spanned::new(LineType { action: LineAction::CreateSymlink, recreate: true, boot: false, noerror: false, force: false }, dummy_file, 0..2 ),
-                path: Spanned::new(SpecifierString(b"/run/gdm/.config/pulse/default.pa".to_vec(), [].into()), dummy_file, 3..36),
+                path: Spanned::new(SpecifierString::new_without_specifiers((*b"/run/gdm/.config/pulse/default.pa").into()), dummy_file, 3..36),
                 mode: Spanned::new(None, dummy_file, 37..38),
                 owner: Spanned::new(None, dummy_file, 39..40),
                 group: Spanned::new(None, dummy_file, 41..42),
@@ -966,7 +969,7 @@ mod test {
                     0..2
                 ),
                 path: Spanned::new(
-                    SpecifierString(b"/etc/group.lock".to_vec(), [].into()),
+                    SpecifierString::new_without_specifiers((*b"/etc/group.lock").into()),
                     file,
                     3..18
                 ),

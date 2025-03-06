@@ -1,9 +1,10 @@
 use core::str;
 use std::{
     borrow::Cow,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt::Display,
     ops::{Deref, Range},
+    os::unix::ffi::OsStrExt,
     path::Path,
     time::Duration,
 };
@@ -375,7 +376,7 @@ impl Display for Specifier {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct SpecifierString(pub Vec<u8>, pub Box<[(Specifier, Vec<u8>)]>);
+pub struct SpecifierString(Box<[u8]>, Box<[(Specifier, Box<[u8]>)]>);
 
 impl Display for SpecifierString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -384,5 +385,51 @@ impl Display for SpecifierString {
             write!(f, "{}{}", spec, str::from_utf8(string).unwrap())?
         }
         Ok(())
+    }
+}
+
+impl SpecifierString {
+    pub fn new(
+        initial_component: Box<[u8]>,
+        trailing_components: Box<[(Specifier, Box<[u8]>)]>,
+    ) -> Self {
+        Self(initial_component, trailing_components)
+    }
+    pub fn new_without_specifiers(string: Box<[u8]>) -> Self {
+        Self::new(string, [].into())
+    }
+    pub fn as_path_no_specifiers(&self) -> Option<&Path> {
+        if self.1.is_empty() {
+            Some(Path::new(OsStr::from_bytes(&self.0)))
+        } else {
+            None
+        }
+    }
+    pub fn components_iter(&self) -> impl Iterator<Item = &[u8]> {
+        struct Iter<'a> {
+            idx: usize,
+            str: &'a SpecifierString,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a [u8];
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let value = if self.idx == 0 {
+                    self.str.0.as_ref()
+                } else {
+                    self.str.1.get(self.idx - 1)?.1.as_ref()
+                };
+                self.idx += 1;
+                Some(value)
+            }
+        }
+        Iter { idx: 0, str: self }
+    }
+    pub fn first_component(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn specifier_iter(&self) -> impl Iterator<Item = &Specifier> {
+        self.1.iter().map(|(specifier, _)| specifier)
     }
 }

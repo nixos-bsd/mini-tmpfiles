@@ -7,7 +7,7 @@ use eyre::Context;
 use std::{
     collections::BTreeMap,
     error::Error,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs::{self, Permissions},
     io::{self, Write},
     os::unix::{
@@ -119,9 +119,11 @@ fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
                 buf.push(piece);
                 if check {
                     match fs::symlink_metadata(&buf) {
-                        Ok(m) => if !m.is_dir() {
-                            Err(eyre::eyre!("A parent directory is not a directory"))?
-                        },
+                        Ok(m) => {
+                            if !m.is_dir() {
+                                Err(eyre::eyre!("A parent directory is not a directory"))?
+                            }
+                        }
                         Err(e) => match e.kind() {
                             io::ErrorKind::NotFound => {
                                 match fs::DirBuilder::new().mode(0o755).create(&buf) {
@@ -156,16 +158,16 @@ fn create(line: &Line) -> eyre::Result<()> {
     let line_type = line.line_type.data;
     match line_type.action {
         config_file::LineAction::CreateFile => {
-            let file = Path::new(OsStr::from_bytes(&line.path.data.0));
             let contents = match line.argument.data.as_ref() {
                 Some(contents) => contents.as_bytes(),
                 None => b"",
             };
             if contents.contains(&b'%') {
                 todo!("Specifiers in file contents not yet implemented")
-            } else if !line.path.data.1.is_empty() {
-                Err(eyre::eyre!("Specifiers in file path not yet implemented"))?
             }
+            let Some(file) = line.path.data.as_path_no_specifiers() else {
+                Err(eyre::eyre!("Specifiers in file path not yet implemented"))?
+            };
             match fs::symlink_metadata(file) {
                 Ok(meta) => {
                     if meta.is_dir() {
@@ -239,12 +241,11 @@ fn create(line: &Line) -> eyre::Result<()> {
         }
         config_file::LineAction::WriteFile => todo!(),
         config_file::LineAction::CreateAndCleanUpDirectory => {
-            let dir = Path::new(OsStr::from_bytes(&line.path.data.0));
-            if !line.path.data.1.is_empty() {
+            let Some(dir) = line.path.data.as_path_no_specifiers() else {
                 Err(eyre::eyre!(
                     "Specifiers in directory path not yet implemented"
                 ))?
-            }
+            };
             match fs::symlink_metadata(dir) {
                 Ok(meta) => {
                     if meta.is_dir() {
@@ -311,12 +312,12 @@ fn create(line: &Line) -> eyre::Result<()> {
                 todo!()
             }
             let target = line.argument.data.as_ref().unwrap();
-            let link = Path::new(OsStr::from_bytes(&line.path.data.0));
             if target.as_bytes().contains(&b'%') {
                 todo!("Specifiers in symlink target not yet implemented")
-            } else if !line.path.data.1.is_empty() {
-                todo!("Specifiers in symlink path not yet implemented")
             }
+            let Some(link) = line.path.data.as_path_no_specifiers() else {
+                todo!("Specifiers in symlink path not yet implemented")
+            };
             let target = Path::new(target);
             match fs::symlink_metadata(link) {
                 Ok(meta) => {
