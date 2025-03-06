@@ -60,7 +60,7 @@ impl FileOwner {
         match self {
             FileOwner::Id(x) => Ok(*x),
             FileOwner::Name(s) => Ok(users::get_user_by_name(s)
-                .ok_or(eyre::eyre!("User {} not found", s))?
+                .ok_or_else(|| eyre::eyre!("User {s} not found"))?
                 .uid()),
         }
     }
@@ -69,10 +69,10 @@ impl FileOwner {
         match self {
             FileOwner::Id(x) => Ok(Cow::Owned(
                 users::get_user_by_uid(*x)
-                    .ok_or(eyre::eyre!("User {} not found", x))?
+                    .ok_or_else(|| eyre::eyre!("User {x} not found"))?
                     .name()
                     .to_str()
-                    .ok_or(eyre::eyre!("User {} is not valid utf-8", x))?
+                    .ok_or_else(|| eyre::eyre!("User {x} is not valid utf-8"))?
                     .to_owned(),
             )),
             FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
@@ -83,7 +83,7 @@ impl FileOwner {
         match self {
             FileOwner::Id(x) => Ok(*x),
             FileOwner::Name(s) => Ok(users::get_group_by_name(s)
-                .ok_or(eyre::eyre!("Group {} not found", s))?
+                .ok_or_else(|| eyre::eyre!("Group {s} not found"))?
                 .gid()),
         }
     }
@@ -92,10 +92,10 @@ impl FileOwner {
         match self {
             FileOwner::Id(x) => Ok(Cow::Owned(
                 users::get_group_by_gid(*x)
-                    .ok_or(eyre::eyre!("Group {} not found", x))?
+                    .ok_or_else(|| eyre::eyre!("Group {x} not found"))?
                     .name()
                     .to_str()
-                    .ok_or(eyre::eyre!("Group {} is not valid utf-8", x))?
+                    .ok_or_else(|| eyre::eyre!("Group {x} is not valid utf-8"))?
                     .to_owned(),
             )),
             FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
@@ -151,6 +151,14 @@ pub struct Spanned<'a, T> {
     pub data: T,
     pub file: &'a Path,
     pub characters: Range<usize>,
+}
+
+impl<T> Deref for Spanned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 impl<'a, T> Spanned<'a, T> {
@@ -326,8 +334,8 @@ impl Specifier {
             'M' => ImageID,
             'o' => OperatingSystemID,
             'S' => StateDir,
-            'T' => RuntimeDir,
             't' => TempDir,
+            'T' => RuntimeDir,
             'u' => Username,
             'U' => UserUID,
             'v' => KernelRelease,
@@ -377,16 +385,6 @@ impl Display for Specifier {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpecifierString(Box<[u8]>, Box<[(Specifier, Box<[u8]>)]>);
-
-impl Display for SpecifierString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", str::from_utf8(&self.0).unwrap())?;
-        for (spec, string) in &self.1 {
-            write!(f, "{}{}", spec, str::from_utf8(string).unwrap())?
-        }
-        Ok(())
-    }
-}
 
 impl SpecifierString {
     pub fn new(

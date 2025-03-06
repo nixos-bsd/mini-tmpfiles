@@ -2,7 +2,7 @@ mod config_file;
 mod parser;
 
 use clap::Parser;
-use config_file::Line;
+use config_file::{FileOwner, Line, Mode};
 use eyre::Context;
 use std::{
     collections::BTreeMap,
@@ -66,15 +66,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if args.create {
         for (i, line) in config.iter().enumerate() {
-            match create(line) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprint!("{}: line {}", line.line_type.file.to_string_lossy(), i + 1);
-                    for err in e.chain() {
-                        eprint!(": {}", err);
-                    }
-                    eprintln!();
+            if let Err(e) = create(line) {
+                eprint!("{}: line {}", line.line_type.file.to_string_lossy(), i + 1);
+                for err in e.chain() {
+                    eprint!(": {}", err);
                 }
+                eprintln!();
             }
         }
     }
@@ -119,33 +116,19 @@ fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
                 buf.push(piece);
                 if check {
                     match fs::symlink_metadata(&buf) {
-                        Ok(m) => {
-                            if !m.is_dir() {
-                                Err(eyre::eyre!("A parent directory is not a directory"))?
-                            }
+                        Ok(m) if m.is_dir() => continue,
+                        Ok(_) => {
+                            return Err(eyre::eyre!("A parent directory is not a directory"));
                         }
-                        Err(e) => match e.kind() {
-                            io::ErrorKind::NotFound => {
-                                match fs::DirBuilder::new().mode(0o755).create(&buf) {
-                                    Ok(_) => {}
-                                    Err(e) => match e.kind() {
-                                        io::ErrorKind::AlreadyExists => {}
-                                        _ => {
-                                            Err(e).wrap_err("Failed to create parent directory")?
-                                        }
-                                    },
-                                }
-                            }
-                            _ => Err(e).wrap_err("Failed to get parent directory metadata")?,
-                        },
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                            Err(e).wrap_err("Failed to get parent directory metadata")?
+                        }
+                        Err(_) => {} // Not found. Create it below
                     }
-                } else {
-                    match fs::DirBuilder::new().mode(0o755).create(&buf) {
-                        Ok(_) => {}
-                        Err(e) => match e.kind() {
-                            io::ErrorKind::AlreadyExists => {}
-                            _ => Err(e).wrap_err("Failed to create parent directory")?,
-                        },
+                }
+                if let Err(e) = fs::DirBuilder::new().mode(0o755).create(&buf) {
+                    if e.kind() != io::ErrorKind::AlreadyExists {
+                        Err(e).wrap_err("Failed to create parent directory")?;
                     }
                 }
             }
@@ -158,14 +141,11 @@ fn create(line: &Line) -> eyre::Result<()> {
     let line_type = line.line_type.data;
     match line_type.action {
         config_file::LineAction::CreateFile => {
-            let contents = match line.argument.data.as_ref() {
-                Some(contents) => contents.as_bytes(),
-                None => b"",
-            };
+            let contents = line.argument.as_deref().unwrap_or_default().as_bytes();
             if contents.contains(&b'%') {
                 todo!("Specifiers in file contents not yet implemented")
             }
-            let Some(file) = line.path.data.as_path_no_specifiers() else {
+            let Some(file) = line.path.as_path_no_specifiers() else {
                 Err(eyre::eyre!("Specifiers in file path not yet implemented"))?
             };
             match fs::symlink_metadata(file) {
@@ -188,27 +168,14 @@ fn create(line: &Line) -> eyre::Result<()> {
                     } else if meta.is_file() {
                         if !line_type.recreate {
                             // It's already here! Fix up the attrs and bail.
-                            if let Some(specmode) = line.mode.data.as_ref() {
-                                if specmode.value != meta.mode() {
-                                    fs::set_permissions(
-                                        file,
-                                        Permissions::from_mode(specmode.value),
-                                    )
-                                    .wrap_err("Failed to set permissions of existing directory")?;
-                                }
-                            }
-                            if let Some(specuser) = line.owner.data.as_ref() {
-                                let specuid = specuser.as_uid()?;
-                                if specuid != meta.uid() {
-                                    std::os::unix::fs::chown(file, Some(specuid), None)?;
-                                }
-                            }
-                            if let Some(specuser) = line.group.data.as_ref() {
-                                let specgid = specuser.as_gid()?;
-                                if specgid != meta.gid() {
-                                    std::os::unix::fs::chown(file, None, Some(specgid))?;
-                                }
-                            }
+                            fixup_attrs(
+                                file,
+                                &meta,
+                                &line.mode,
+                                &line.owner,
+                                &line.group,
+                                "existing file",
+                            )?;
                             return Ok(());
                         }
                     } else {
@@ -229,19 +196,13 @@ fn create(line: &Line) -> eyre::Result<()> {
                 fp.set_permissions(Permissions::from_mode(specmode.value))
                     .wrap_err("Setting permissions of new file")?;
             }
-            let uid = match line.owner.data.as_ref() {
-                Some(o) => Some(o.as_uid()?),
-                None => None,
-            };
-            let gid = match line.group.data.as_ref() {
-                Some(o) => Some(o.as_gid()?),
-                None => None,
-            };
+            let uid = line.owner.data.as_ref().map(|o| o.as_uid()).transpose()?;
+            let gid = line.owner.data.as_ref().map(|o| o.as_gid()).transpose()?;
             std::os::unix::fs::fchown(&fp, uid, gid).wrap_err("Setting ownership of new file")?;
         }
         config_file::LineAction::WriteFile => todo!(),
         config_file::LineAction::CreateAndCleanUpDirectory => {
-            let Some(dir) = line.path.data.as_path_no_specifiers() else {
+            let Some(dir) = line.path.as_path_no_specifiers() else {
                 Err(eyre::eyre!(
                     "Specifiers in directory path not yet implemented"
                 ))?
@@ -250,24 +211,14 @@ fn create(line: &Line) -> eyre::Result<()> {
                 Ok(meta) => {
                     if meta.is_dir() {
                         // It's already here! Fix up the attrs and bail.
-                        if let Some(specmode) = line.mode.data.as_ref() {
-                            if specmode.value != meta.mode() {
-                                fs::set_permissions(dir, Permissions::from_mode(specmode.value))
-                                    .wrap_err("Failed to set permissions of existing directory")?;
-                            }
-                        }
-                        if let Some(specuser) = line.owner.data.as_ref() {
-                            let specuid = specuser.as_uid()?;
-                            if specuid != meta.uid() {
-                                std::os::unix::fs::chown(dir, Some(specuid), None)?;
-                            }
-                        }
-                        if let Some(specuser) = line.group.data.as_ref() {
-                            let specgid = specuser.as_gid()?;
-                            if specgid != meta.gid() {
-                                std::os::unix::fs::chown(dir, None, Some(specgid))?;
-                            }
-                        }
+                        fixup_attrs(
+                            dir,
+                            &meta,
+                            &line.mode,
+                            &line.owner,
+                            &line.group,
+                            "existing directory",
+                        )?;
                         return Ok(());
                     } else if meta.is_file() || meta.is_symlink() {
                         if line_type.force {
@@ -289,20 +240,14 @@ fn create(line: &Line) -> eyre::Result<()> {
             }
             create_parents(dir, line_type.force)?;
             fs::DirBuilder::new().create(dir)?;
-            if let Some(mode) = &line.mode.data {
-                fs::set_permissions(dir, Permissions::from_mode(mode.value))
-                    .wrap_err("Setting mode of new directory")?;
-            }
-            let uid = match line.owner.data.as_ref() {
-                Some(o) => Some(o.as_uid()?),
-                None => None,
-            };
-            let gid = match line.group.data.as_ref() {
-                Some(o) => Some(o.as_gid()?),
-                None => None,
-            };
-            std::os::unix::fs::chown(dir, uid, gid)
-                .wrap_err("Setting ownership of new directory")?;
+            fixup_attrs(
+                dir,
+                &fs::symlink_metadata(dir)?,
+                &line.mode,
+                &line.owner,
+                &line.group,
+                "Setting mode of new directory",
+            )?;
         }
         config_file::LineAction::CreateAndRemoveDirectory => todo!(),
         config_file::LineAction::CleanUpDirectory => todo!(),
@@ -362,6 +307,37 @@ fn create(line: &Line) -> eyre::Result<()> {
         config_file::LineAction::SetAttrRecursive => todo!(),
         config_file::LineAction::SetAcl => todo!(),
         config_file::LineAction::SetAclRecursive => todo!(),
+    }
+    Ok(())
+}
+
+fn fixup_attrs(
+    path: &Path,
+    meta: &fs::Metadata,
+    mode: &Option<Mode>,
+    owner: &Option<FileOwner>,
+    group: &Option<FileOwner>,
+    name_in_error: &str,
+) -> Result<(), eyre::Error> {
+    if let Some(ref specmode) = mode {
+        if specmode.value != meta.mode() {
+            fs::set_permissions(path, Permissions::from_mode(specmode.value))
+                .wrap_err_with(|| format!("Setting mode of {name_in_error}"))?;
+        }
+    }
+    let uid = owner
+        .as_ref()
+        .map(FileOwner::as_uid)
+        .transpose()?
+        .filter(|&uid| uid != meta.uid());
+    let gid = group
+        .as_ref()
+        .map(FileOwner::as_gid)
+        .transpose()?
+        .filter(|&gid| gid != meta.gid());
+    if uid.is_some() || gid.is_some() {
+        std::os::unix::fs::chown(path, uid, gid)
+            .wrap_err_with(|| format!("Setting ownership of {name_in_error}"))?;
     }
     Ok(())
 }
