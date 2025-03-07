@@ -2,14 +2,18 @@ mod config_file;
 mod parser;
 
 use clap::Parser;
-use config_file::Line;
+use config_file::{FileOwner, Line, Mode};
+use eyre::Context;
 use std::{
     collections::BTreeMap,
     error::Error,
-    ffi::{OsStr, OsString},
-    fs,
+    ffi::OsString,
+    fs::{self, Permissions},
     io::{self, Write},
-    os::unix::ffi::OsStrExt,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -61,7 +65,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         todo!("Cleaning is not yet implemented")
     }
     if args.create {
-        create(&config)?;
+        for (i, line) in config.iter().enumerate() {
+            if let Err(e) = create(line) {
+                eprint!("{}: line {}", line.line_type.file.to_string_lossy(), i + 1);
+                for err in e.chain() {
+                    eprint!(": {}", err);
+                }
+                eprintln!();
+            }
+        }
     }
 
     Ok(())
@@ -89,69 +101,243 @@ fn parsed_config(config_files: &BTreeMap<OsString, PathBuf>) -> eyre::Result<Vec
     Ok(config)
 }
 
-fn create(config: &[Line]) -> eyre::Result<()> {
-    for line in config {
-        let line_type = line.line_type.data;
-        match line_type.action {
-            config_file::LineAction::CreateFile => todo!(),
-            config_file::LineAction::WriteFile => todo!(),
-            config_file::LineAction::CreateAndCleanUpDirectory => todo!(),
-            config_file::LineAction::CreateAndRemoveDirectory => todo!(),
-            config_file::LineAction::CleanUpDirectory => todo!(),
-            config_file::LineAction::CreateFifo => todo!(),
-            config_file::LineAction::CreateSymlink => {
-                if line_type.boot || line_type.force || line_type.noerror || !line_type.recreate {
-                    todo!()
-                }
-                let target = line.argument.data.as_ref().unwrap();
-                let link = Path::new(OsStr::from_bytes(&line.path.data.0));
-                if target.as_bytes().contains(&b'%') {
-                    todo!("Specifiers in symlink target not yet implemented")
-                } else if !line.path.data.1.is_empty() {
-                    todo!("Specifiers in symlink path not yet implemented")
-                }
-                let target = Path::new(target);
-                match fs::symlink_metadata(link) {
-                    Ok(meta) => {
-                        if meta.is_dir() {
-                            // fs::remove_dir_all(target);
-                            todo!("Currently won't clobber directories to create symlinks")
-                        } else if meta.is_file() {
-                            fs::remove_file(link)?;
-                        } else if meta.is_symlink() {
-                            let existing_target = fs::read_link(link)?;
-                            if existing_target != target {
-                                fs::remove_file(link)?;
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            todo!("Won't clobber things other than files, directories, or symlinks")
+fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
+    let Some(path) = path.parent() else {
+        return Ok(());
+    };
+    let mut buf = PathBuf::from("/");
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(_) => todo!(),
+            std::path::Component::RootDir => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => Err(eyre::eyre!("Path may not contain .."))?,
+            std::path::Component::Normal(piece) => {
+                buf.push(piece);
+                if check {
+                    match fs::symlink_metadata(&buf) {
+                        Ok(m) if m.is_dir() => continue,
+                        Ok(_) => {
+                            return Err(eyre::eyre!("A parent directory is not a directory"));
                         }
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                            Err(e).wrap_err("Failed to get parent directory metadata")?
+                        }
+                        Err(_) => {} // Not found. Create it below
                     }
-                    Err(e) => match e.kind() {
-                        io::ErrorKind::NotFound => {}
-                        _ => todo!(),
-                    },
                 }
-                std::os::unix::fs::symlink(Path::new(target), link)?;
+                if let Err(e) = fs::DirBuilder::new().mode(0o755).create(&buf) {
+                    if e.kind() != io::ErrorKind::AlreadyExists {
+                        Err(e).wrap_err("Failed to create parent directory")?;
+                    }
+                }
             }
-            config_file::LineAction::CreateCharDevice => todo!(),
-            config_file::LineAction::CreateBlockDevice => todo!(),
-            config_file::LineAction::Copy => todo!(),
-            config_file::LineAction::Ignore => todo!(),
-            config_file::LineAction::IgnoreNonRecursive => todo!(),
-            config_file::LineAction::Remove => todo!(),
-            config_file::LineAction::RemoveRecursive => todo!(),
-            config_file::LineAction::SetMode => todo!(),
-            config_file::LineAction::SetModeRecursive => todo!(),
-            config_file::LineAction::SetXattr => todo!(),
-            config_file::LineAction::SetXattrRecursive => todo!(),
-            config_file::LineAction::SetAttr => todo!(),
-            config_file::LineAction::SetAttrRecursive => todo!(),
-            config_file::LineAction::SetAcl => todo!(),
-            config_file::LineAction::SetAclRecursive => todo!(),
         }
+    }
+    Ok(())
+}
+
+fn create(line: &Line) -> eyre::Result<()> {
+    let line_type = line.line_type.data;
+    match line_type.action {
+        config_file::LineAction::CreateFile => {
+            let contents = line.argument.as_deref().unwrap_or_default().as_bytes();
+            if contents.contains(&b'%') {
+                todo!("Specifiers in file contents not yet implemented")
+            }
+            let Some(file) = line.path.as_path_no_specifiers() else {
+                Err(eyre::eyre!("Specifiers in file path not yet implemented"))?
+            };
+            match fs::symlink_metadata(file) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        if line_type.force {
+                            fs::remove_dir(file)
+                                .wrap_err("Failed to remove directory in place of file")?;
+                        } else {
+                            Err(eyre::eyre!("There is already a directory here"))?;
+                        }
+                    } else if meta.is_symlink() {
+                        if line_type.force {
+                            Err(eyre::eyre!(
+                                "Currently won't clobber symlinks to create files"
+                            ))?;
+                        } else {
+                            Err(eyre::eyre!("There is already a symlink here"))?;
+                        }
+                    } else if meta.is_file() {
+                        if !line_type.recreate {
+                            // It's already here! Fix up the attrs and bail.
+                            fixup_attrs(
+                                file,
+                                &meta,
+                                &line.mode,
+                                &line.owner,
+                                &line.group,
+                                "existing file",
+                            )?;
+                            return Ok(());
+                        }
+                    } else {
+                        Err(eyre::eyre!(
+                            "Won't clobber things other than files, directories, or symlinks"
+                        ))?
+                    }
+                }
+                Err(e) => match e.kind() {
+                    io::ErrorKind::NotFound => {}
+                    _ => Err(e).wrap_err("Failed to query file metadata")?,
+                },
+            }
+            create_parents(file, line_type.force)?;
+            let mut fp = fs::File::create(file).wrap_err("Creating file")?;
+            fp.write(contents).wrap_err("Writing contents")?;
+            if let Some(specmode) = line.mode.data.as_ref() {
+                fp.set_permissions(Permissions::from_mode(specmode.value))
+                    .wrap_err("Setting permissions of new file")?;
+            }
+            let uid = line.owner.data.as_ref().map(|o| o.as_uid()).transpose()?;
+            let gid = line.owner.data.as_ref().map(|o| o.as_gid()).transpose()?;
+            std::os::unix::fs::fchown(&fp, uid, gid).wrap_err("Setting ownership of new file")?;
+        }
+        config_file::LineAction::WriteFile => todo!(),
+        config_file::LineAction::CreateAndCleanUpDirectory => {
+            let Some(dir) = line.path.as_path_no_specifiers() else {
+                Err(eyre::eyre!(
+                    "Specifiers in directory path not yet implemented"
+                ))?
+            };
+            match fs::symlink_metadata(dir) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        // It's already here! Fix up the attrs and bail.
+                        fixup_attrs(
+                            dir,
+                            &meta,
+                            &line.mode,
+                            &line.owner,
+                            &line.group,
+                            "existing directory",
+                        )?;
+                        return Ok(());
+                    } else if meta.is_file() || meta.is_symlink() {
+                        if line_type.force {
+                            fs::remove_file(dir)
+                                .wrap_err("Failed to remove file in place of directory")?;
+                        } else {
+                            Err(eyre::eyre!("There is already a file here"))?;
+                        }
+                    } else {
+                        Err(eyre::eyre!(
+                            "Won't clobber things other than files, directories, or symlinks"
+                        ))?
+                    }
+                }
+                Err(e) => match e.kind() {
+                    io::ErrorKind::NotFound => {}
+                    _ => Err(e).wrap_err("Failed to query file metadata")?,
+                },
+            }
+            create_parents(dir, line_type.force)?;
+            fs::DirBuilder::new().create(dir)?;
+            fixup_attrs(
+                dir,
+                &fs::symlink_metadata(dir)?,
+                &line.mode,
+                &line.owner,
+                &line.group,
+                "Setting mode of new directory",
+            )?;
+        }
+        config_file::LineAction::CreateAndRemoveDirectory => todo!(),
+        config_file::LineAction::CleanUpDirectory => todo!(),
+        config_file::LineAction::CreateFifo => todo!(),
+        config_file::LineAction::CreateSymlink => {
+            if line_type.boot || line_type.noerror || !line_type.recreate {
+                todo!()
+            }
+            let target = line.argument.data.as_ref().unwrap();
+            if target.as_bytes().contains(&b'%') {
+                todo!("Specifiers in symlink target not yet implemented")
+            }
+            let Some(link) = line.path.data.as_path_no_specifiers() else {
+                todo!("Specifiers in symlink path not yet implemented")
+            };
+            let target = Path::new(target);
+            match fs::symlink_metadata(link) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        // fs::remove_dir_all(target);
+                        todo!("Currently won't clobber directories to create symlinks")
+                    } else if meta.is_file() {
+                        fs::remove_file(link)?;
+                    } else if meta.is_symlink() {
+                        let existing_target = fs::read_link(link)?;
+                        if existing_target != target {
+                            fs::remove_file(link)?;
+                        } else {
+                            return Ok(());
+                        }
+                    } else {
+                        Err(eyre::eyre!(
+                            "Won't clobber things other than files, directories, or symlinks"
+                        ))?;
+                    }
+                }
+                Err(e) => match e.kind() {
+                    io::ErrorKind::NotFound => {}
+                    _ => Err(e).wrap_err("Failed querying directory metadata")?,
+                },
+            }
+            create_parents(link, line_type.force)?;
+            std::os::unix::fs::symlink(target, link)?;
+        }
+        config_file::LineAction::CreateCharDevice => todo!(),
+        config_file::LineAction::CreateBlockDevice => todo!(),
+        config_file::LineAction::Copy => todo!(),
+        config_file::LineAction::Ignore => todo!(),
+        config_file::LineAction::IgnoreNonRecursive => todo!(),
+        config_file::LineAction::Remove => todo!(),
+        config_file::LineAction::RemoveRecursive => todo!(),
+        config_file::LineAction::SetMode => todo!(),
+        config_file::LineAction::SetModeRecursive => todo!(),
+        config_file::LineAction::SetXattr => todo!(),
+        config_file::LineAction::SetXattrRecursive => todo!(),
+        config_file::LineAction::SetAttr => todo!(),
+        config_file::LineAction::SetAttrRecursive => todo!(),
+        config_file::LineAction::SetAcl => todo!(),
+        config_file::LineAction::SetAclRecursive => todo!(),
+    }
+    Ok(())
+}
+
+fn fixup_attrs(
+    path: &Path,
+    meta: &fs::Metadata,
+    mode: &Option<Mode>,
+    owner: &Option<FileOwner>,
+    group: &Option<FileOwner>,
+    name_in_error: &str,
+) -> Result<(), eyre::Error> {
+    if let Some(ref specmode) = mode {
+        if specmode.value != meta.mode() {
+            fs::set_permissions(path, Permissions::from_mode(specmode.value))
+                .wrap_err_with(|| format!("Setting mode of {name_in_error}"))?;
+        }
+    }
+    let uid = owner
+        .as_ref()
+        .map(FileOwner::as_uid)
+        .transpose()?
+        .filter(|&uid| uid != meta.uid());
+    let gid = group
+        .as_ref()
+        .map(FileOwner::as_gid)
+        .transpose()?
+        .filter(|&gid| gid != meta.gid());
+    if uid.is_some() || gid.is_some() {
+        std::os::unix::fs::chown(path, uid, gid)
+            .wrap_err_with(|| format!("Setting ownership of {name_in_error}"))?;
     }
     Ok(())
 }

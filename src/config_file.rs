@@ -1,6 +1,10 @@
+use core::str;
 use std::{
-    ffi::OsString,
+    borrow::Cow,
+    ffi::{OsStr, OsString},
+    fmt::Display,
     ops::{Deref, Range},
+    os::unix::ffi::OsStrExt,
     path::Path,
     time::Duration,
 };
@@ -51,6 +55,54 @@ pub enum FileOwner {
     Name(String),
 }
 
+impl FileOwner {
+    pub(crate) fn as_uid(&self) -> eyre::Result<u32> {
+        match self {
+            FileOwner::Id(x) => Ok(*x),
+            FileOwner::Name(s) => Ok(uzers::get_user_by_name(s)
+                .ok_or_else(|| eyre::eyre!("User {s} not found"))?
+                .uid()),
+        }
+    }
+
+    pub(crate) fn as_uname(&self) -> eyre::Result<Cow<str>> {
+        match self {
+            FileOwner::Id(x) => Ok(Cow::Owned(
+                uzers::get_user_by_uid(*x)
+                    .ok_or_else(|| eyre::eyre!("User {x} not found"))?
+                    .name()
+                    .to_str()
+                    .ok_or_else(|| eyre::eyre!("User {x} is not valid utf-8"))?
+                    .to_owned(),
+            )),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
+        }
+    }
+
+    pub(crate) fn as_gid(&self) -> eyre::Result<u32> {
+        match self {
+            FileOwner::Id(x) => Ok(*x),
+            FileOwner::Name(s) => Ok(uzers::get_group_by_name(s)
+                .ok_or_else(|| eyre::eyre!("Group {s} not found"))?
+                .gid()),
+        }
+    }
+
+    pub(crate) fn as_gname(&self) -> eyre::Result<Cow<str>> {
+        match self {
+            FileOwner::Id(x) => Ok(Cow::Owned(
+                uzers::get_group_by_gid(*x)
+                    .ok_or_else(|| eyre::eyre!("Group {x} not found"))?
+                    .name()
+                    .to_str()
+                    .ok_or_else(|| eyre::eyre!("Group {x} is not valid utf-8"))?
+                    .to_owned(),
+            )),
+            FileOwner::Name(s) => Ok(Cow::Borrowed(s)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]
 pub struct CleanupAge {
     /// Minimum age before cleaning up
@@ -97,8 +149,16 @@ impl CleanupAge {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Spanned<'a, T> {
     pub data: T,
-    file: &'a Path,
-    characters: Range<usize>,
+    pub file: &'a Path,
+    pub characters: Range<usize>,
+}
+
+impl<T> Deref for Spanned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 impl<'a, T> Spanned<'a, T> {
@@ -288,5 +348,86 @@ impl Specifier {
     }
 }
 
+impl Display for Specifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "%{}",
+            match self {
+                Specifier::Architecture => "a",
+                Specifier::ImageVersion => "A",
+                Specifier::BootID => "b",
+                Specifier::BuildID => "B",
+                Specifier::CacheDir => "C",
+                Specifier::UserGroup => "g",
+                Specifier::UserGID => "G",
+                Specifier::UserHome => "h",
+                Specifier::Hostname => "H",
+                Specifier::ShortHostname => "l",
+                Specifier::LogDir => "L",
+                Specifier::MachineID => "m",
+                Specifier::ImageID => "M",
+                Specifier::OperatingSystemID => "o",
+                Specifier::StateDir => "S",
+                Specifier::RuntimeDir => "T",
+                Specifier::TempDir => "t",
+                Specifier::Username => "u",
+                Specifier::UserUID => "U",
+                Specifier::KernelRelease => "v",
+                Specifier::PersistentTempDir => "V",
+                Specifier::VersionID => "w",
+                Specifier::VariantID => "W",
+                Specifier::PercentSign => "%",
+            }
+        )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct SpecifierString(pub Vec<u8>, pub Box<[(Specifier, Vec<u8>)]>);
+pub struct SpecifierString(Box<[u8]>, Box<[(Specifier, Box<[u8]>)]>);
+
+impl SpecifierString {
+    pub fn new(
+        initial_component: Box<[u8]>,
+        trailing_components: Box<[(Specifier, Box<[u8]>)]>,
+    ) -> Self {
+        Self(initial_component, trailing_components)
+    }
+    pub fn new_without_specifiers(string: Box<[u8]>) -> Self {
+        Self::new(string, [].into())
+    }
+    pub fn as_path_no_specifiers(&self) -> Option<&Path> {
+        if self.1.is_empty() {
+            Some(Path::new(OsStr::from_bytes(&self.0)))
+        } else {
+            None
+        }
+    }
+    pub fn components_iter(&self) -> impl Iterator<Item = &[u8]> {
+        struct Iter<'a> {
+            idx: usize,
+            str: &'a SpecifierString,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a [u8];
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let value = if self.idx == 0 {
+                    self.str.0.as_ref()
+                } else {
+                    self.str.1.get(self.idx - 1)?.1.as_ref()
+                };
+                self.idx += 1;
+                Some(value)
+            }
+        }
+        Iter { idx: 0, str: self }
+    }
+    pub fn first_component(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn specifier_iter(&self) -> impl Iterator<Item = &Specifier> {
+        self.1.iter().map(|(specifier, _)| specifier)
+    }
+}
