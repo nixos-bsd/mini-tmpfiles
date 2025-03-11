@@ -16,6 +16,9 @@
       forAllSystems = f: lib.genAttrs lib.systems.flakeExposed (system: f (makePkgs system));
     in
     {
+      checks = forAllSystems (pkgs: {
+        inherit (pkgs.mini-tmpfiles.passthru.tests) mini-vmtest;
+      });
       packages = forAllSystems (pkgs: rec {
         inherit (pkgs) mini-tmpfiles;
         default = mini-tmpfiles;
@@ -44,7 +47,10 @@
           version = "0.1";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          doCheck = false;
+
+          passthru.tests.mini-vmtest = import ./tests/test.nix {
+            pkgs = final;
+          };
 
           meta = with final.lib; {
             homepage = "https://github.com/nixos-bsd/mini-tmpfiles";

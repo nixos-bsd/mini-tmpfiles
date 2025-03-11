@@ -1,0 +1,12 @@
+/root:
+total 4
+drwxr-xr-x 2 root 4096  cat/
+
+/root/cat:
+total 4
+-rwxrwxrwx 1 root 5  girl*
+--------------e------- /root/cat
+
+/root/cat:
+--------------e------- /root/cat/girl
+
