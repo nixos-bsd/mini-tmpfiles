@@ -6,8 +6,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use base64::engine::Engine;
 use base64::DecodeError;
+use base64::engine::Engine;
 use phf::phf_map;
 
 use crate::config_file::{
@@ -147,7 +147,7 @@ fn take_from_slice_while<'a>(
 
 fn take_string_from_slice<'a>(slice: &mut &'a [u8], s: &str) -> Option<&'a [u8]> {
     let remaining = slice.strip_prefix(s.as_bytes())?;
-    let taken = &slice[..s.as_bytes().len()];
+    let taken = &slice[..s.len()];
     *slice = remaining;
     Some(taken)
 }
@@ -660,8 +660,8 @@ mod test {
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned, SpecifierString},
         parser::{
-            parse_cleanup_age, parse_duration, parse_duration_part, parse_line, CleanupParseError,
-            FieldParseError, FileSpan, ParseError, MICROSECOND, SECOND, WEEK,
+            CleanupParseError, FieldParseError, FileSpan, MICROSECOND, ParseError, SECOND, WEEK,
+            parse_cleanup_age, parse_duration, parse_duration_part, parse_line,
         },
     };
 

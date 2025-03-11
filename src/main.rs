@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 mod config_file;
 mod parser;
 
@@ -17,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::parser::{parse_line, FileSpan};
+use crate::parser::{FileSpan, parse_line};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Standalone replacement for systemd-tmpfiles", long_about = None)]
@@ -319,7 +320,7 @@ fn fixup_attrs(
     group: &Option<FileOwner>,
     name_in_error: &str,
 ) -> Result<(), eyre::Error> {
-    if let Some(ref specmode) = mode {
+    if let Some(specmode) = mode {
         if specmode.value != meta.mode() {
             fs::set_permissions(path, Permissions::from_mode(specmode.value))
                 .wrap_err_with(|| format!("Setting mode of {name_in_error}"))?;
@@ -344,7 +345,9 @@ fn fixup_attrs(
 
 /// Print the output of each configuration file, without reencoding
 fn cat_config(config_files: &BTreeMap<OsString, PathBuf>) -> io::Result<()> {
-    println!("# WARNING: --cat-config is vulnerable to a TOCTOU attack, do not use for security purposes");
+    println!(
+        "# WARNING: --cat-config is vulnerable to a TOCTOU attack, do not use for security purposes"
+    );
 
     // We need to write raw bytes. This is somewhat unsafe due to delete escape codes but I don't
     // want to unescape then escape to fix it.
