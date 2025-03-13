@@ -18,6 +18,10 @@
     {
       checks = forAllSystems (pkgs: {
         inherit (pkgs.mini-tmpfiles.passthru.tests) mini-vmtest;
+        reference-test = import ./tests/test.nix {
+          inherit pkgs;
+          tmpfiles = "systemd-tmpfiles";
+        };
       });
       packages = forAllSystems (pkgs: rec {
         inherit (pkgs) mini-tmpfiles;
