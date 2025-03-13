@@ -9,7 +9,7 @@ let
     d /root/cat 0500
     L+ /root/booted-system 0755 root root - /run/booted-system
     L+ /root/current-system - - - - /run/current-system
-    #f /root/clobbered
+    f /root/clobbered
     f= /root/clobbered/clobbering
   '';
   print-script = pkgs.writeText "print-script.sh" ''

@@ -102,7 +102,7 @@ fn parsed_config(config_files: &BTreeMap<OsString, PathBuf>) -> eyre::Result<Vec
     Ok(config)
 }
 
-fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
+fn create_parents(path: &Path, force: bool) -> eyre::Result<()> {
     let Some(path) = path.parent() else {
         return Ok(());
     };
@@ -115,17 +115,16 @@ fn create_parents(path: &Path, check: bool) -> eyre::Result<()> {
             std::path::Component::ParentDir => Err(eyre::eyre!("Path may not contain .."))?,
             std::path::Component::Normal(piece) => {
                 buf.push(piece);
-                if check {
-                    match fs::symlink_metadata(&buf) {
-                        Ok(m) if m.is_dir() => continue,
-                        Ok(_) => {
-                            return Err(eyre::eyre!("A parent directory is not a directory"));
-                        }
-                        Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                            Err(e).wrap_err("Failed to get parent directory metadata")?
-                        }
-                        Err(_) => {} // Not found. Create it below
+                match fs::symlink_metadata(&buf) {
+                    Ok(m) if m.is_dir() => continue,
+                    Ok(_) if force => fs::remove_file(&buf)
+                        .map_err(|e| eyre::eyre!(e))
+                        .wrap_err("Attempting to replace non-directory parent")?,
+                    Ok(_) => return Err(eyre::eyre!("A parent directory is not a directory")),
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                        Err(e).wrap_err("Failed to get parent directory metadata")?
                     }
+                    Err(_) => {} // Not found. Create it below
                 }
                 if let Err(e) = fs::DirBuilder::new().mode(0o755).create(&buf) {
                     if e.kind() != io::ErrorKind::AlreadyExists {
@@ -186,7 +185,7 @@ fn create(line: &Line) -> eyre::Result<()> {
                     }
                 }
                 Err(e) => match e.kind() {
-                    io::ErrorKind::NotFound => {}
+                    io::ErrorKind::NotADirectory | io::ErrorKind::NotFound => {}
                     _ => Err(e).wrap_err("Failed to query file metadata")?,
                 },
             }
