@@ -10,29 +10,30 @@ use std::{
 };
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[repr(u8)]
 pub enum LineAction {
-    CreateFile,
-    WriteFile,
-    CreateAndCleanUpDirectory,
-    CreateAndRemoveDirectory,
-    CleanUpDirectory,
-    CreateFifo,
-    CreateSymlink,
-    CreateCharDevice,
-    CreateBlockDevice,
-    Copy,
-    Ignore,
-    IgnoreNonRecursive,
-    Remove,
-    RemoveRecursive,
-    SetMode,
-    SetModeRecursive,
-    SetXattr,
-    SetXattrRecursive,
-    SetAttr,
-    SetAttrRecursive,
-    SetAcl,
-    SetAclRecursive,
+    CreateFile = b'f',
+    WriteFile = b'w',
+    CreateAndCleanUpDirectory = b'd',
+    CreateAndRemoveDirectory = b'D',
+    CleanUpDirectory = b'e',
+    CreateFifo = b'p',
+    CreateSymlink = b'L',
+    CreateCharDevice = b'c',
+    CreateBlockDevice = b'b',
+    Copy = b'C',
+    Ignore = b'x',
+    IgnoreNonRecursive = b'X',
+    Remove = b'r',
+    RemoveRecursive = b'R',
+    SetMode = b'z',
+    SetModeRecursive = b'Z',
+    SetXattr = b't',
+    SetXattrRecursive = b'T',
+    SetAttr = b'h',
+    SetAttrRecursive = b'H',
+    SetAcl = b'a',
+    SetAclRecursive = b'A',
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -287,32 +288,33 @@ pub struct Line<'a> {
     pub(crate) argument: Spanned<'a, Option<OsString>>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
 pub enum Specifier {
-    Architecture,      //%a
-    ImageVersion,      //%A
-    BootID,            //%b
-    BuildID,           //%B
-    CacheDir,          //%C
-    UserGroup,         //%g
-    UserGID,           //%G
-    UserHome,          //%h
-    Hostname,          //%H
-    ShortHostname,     //%l
-    LogDir,            //%L
-    MachineID,         //%m
-    ImageID,           //%M
-    OperatingSystemID, //%o
-    StateDir,          //%S
-    RuntimeDir,        //%t
-    TempDir,           //%T
-    Username,          //%u
-    UserUID,           //%U
-    KernelRelease,     //%v
-    PersistentTempDir, //%V
-    VersionID,         //%w
-    VariantID,         //%W
-    PercentSign,       //%%
+    Architecture = b'a',
+    ImageVersion = b'A',
+    BootID = b'b',
+    BuildID = b'B',
+    CacheDir = b'C',
+    UserGroup = b'g',
+    UserGID = b'G',
+    UserHome = b'h',
+    Hostname = b'H',
+    ShortHostname = b'l',
+    LogDir = b'L',
+    MachineID = b'm',
+    ImageID = b'M',
+    OperatingSystemID = b'o',
+    StateDir = b'S',
+    RuntimeDir = b't',
+    TempDir = b'T',
+    Username = b'u',
+    UserUID = b'U',
+    KernelRelease = b'v',
+    PersistentTempDir = b'V',
+    VersionID = b'w',
+    VariantID = b'W',
+    PercentSign = b'%',
 }
 
 impl Specifier {
@@ -350,36 +352,7 @@ impl Specifier {
 
 impl Display for Specifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "%{}",
-            match self {
-                Specifier::Architecture => "a",
-                Specifier::ImageVersion => "A",
-                Specifier::BootID => "b",
-                Specifier::BuildID => "B",
-                Specifier::CacheDir => "C",
-                Specifier::UserGroup => "g",
-                Specifier::UserGID => "G",
-                Specifier::UserHome => "h",
-                Specifier::Hostname => "H",
-                Specifier::ShortHostname => "l",
-                Specifier::LogDir => "L",
-                Specifier::MachineID => "m",
-                Specifier::ImageID => "M",
-                Specifier::OperatingSystemID => "o",
-                Specifier::StateDir => "S",
-                Specifier::RuntimeDir => "T",
-                Specifier::TempDir => "t",
-                Specifier::Username => "u",
-                Specifier::UserUID => "U",
-                Specifier::KernelRelease => "v",
-                Specifier::PersistentTempDir => "V",
-                Specifier::VersionID => "w",
-                Specifier::VariantID => "W",
-                Specifier::PercentSign => "%",
-            }
-        )
+        write!(f, "%{}", *self as u8)
     }
 }
 
