@@ -49,7 +49,16 @@
         mini-tmpfiles = final.rustPlatform.buildRustPackage {
           name = "mini-tmpfiles";
           version = "0.1";
-          src = ./.;
+          src =
+            with final.lib.fileset;
+            toSource {
+              root = ./.;
+              fileset = unions [
+                ./src
+                ./Cargo.toml
+                ./Cargo.lock
+              ];
+            };
           cargoLock.lockFile = ./Cargo.lock;
 
           passthru.tests.mini-vmtest = import ./tests/test.nix {
