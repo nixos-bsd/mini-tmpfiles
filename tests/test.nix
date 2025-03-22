@@ -1,6 +1,6 @@
 {
   pkgs,
-  tmpfiles ? "mini-tmpfiles",
+  reference ? false,
   ...
 }:
 let
@@ -17,14 +17,20 @@ let
     find /root -print0 | sort --zero-terminated | xargs --null lsattr -d || true
   '';
   pristine-file = pkgs.writeText "test.pristine" (builtins.readFile ./test.pristine);
+  tmpfiles = if reference then "systemd-tmpfiles" else "mini-tmpfiles";
 in
 pkgs.testers.runNixOSTest {
-  name = "mini-test";
+  name = if reference then "reference-test" else "mini-test";
   nodes.machine =
-    { config, pkgs, ... }:
+    {
+      config,
+      pkgs,
+      lib,
+      ...
+    }:
     {
       boot.loader.systemd-boot.enable = true;
-      environment.systemPackages = [
+      environment.systemPackages = lib.optionals (!reference) [
         pkgs.mini-tmpfiles
       ];
       # Once mini-tmpfiles is supports everything used during booting we can replace systemd-tmpfiles with it

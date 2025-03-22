@@ -17,11 +17,8 @@
     in
     {
       checks = forAllSystems (pkgs: {
-        inherit (pkgs.mini-tmpfiles.passthru.tests) mini-vmtest;
-        reference-test = import ./tests/test.nix {
-          inherit pkgs;
-          tmpfiles = "systemd-tmpfiles";
-        };
+        mini-vmtest = pkgs.callPackage ./tests/test.nix { };
+        reference-test = pkgs.callPackage ./tests/test.nix { reference = true; };
       });
       packages = forAllSystems (pkgs: rec {
         inherit (pkgs) mini-tmpfiles;
@@ -60,10 +57,6 @@
               ];
             };
           cargoLock.lockFile = ./Cargo.lock;
-
-          passthru.tests.mini-vmtest = import ./tests/test.nix {
-            pkgs = final;
-          };
 
           meta = with final.lib; {
             homepage = "https://github.com/nixos-bsd/mini-tmpfiles";
