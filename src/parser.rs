@@ -252,8 +252,7 @@ fn parse_specifiers(input: Box<[u8]>) -> Result<SpecifierString, ParseError> {
             let Some((&head, tail)) = input.split_first() else {
                 Err(ParseError::IncompleteSpecifier)?
             };
-            let specifier =
-                Specifier::parse(head).ok_or_else(|| ParseError::InvalidSpecifier(head))?;
+            let specifier = Specifier::parse(head).ok_or(ParseError::InvalidSpecifier(head))?;
             input = tail;
             let next_segment = take_from_slice_while(&mut input, |&ch| ch != b'%').into();
             sections.push((specifier, next_segment));
