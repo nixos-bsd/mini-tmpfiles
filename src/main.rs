@@ -9,7 +9,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     ffi::OsString,
-    fs::{self, Permissions},
+    fs::{self, File, Permissions},
     io::{self, Write},
     os::unix::{
         ffi::OsStrExt,
@@ -192,13 +192,13 @@ fn create(line: &Line) -> eyre::Result<()> {
             create_parents(file, line_type.force)?;
             let mut fp = fs::File::create(file).wrap_err("Creating file")?;
             fp.write(contents).wrap_err("Writing contents")?;
-            if let Some(specmode) = line.mode.data.as_ref() {
-                fp.set_permissions(Permissions::from_mode(specmode.value))
-                    .wrap_err("Setting permissions of new file")?;
-            }
-            let uid = line.owner.data.as_ref().map(|o| o.as_uid()).transpose()?;
-            let gid = line.owner.data.as_ref().map(|o| o.as_gid()).transpose()?;
-            std::os::unix::fs::fchown(&fp, uid, gid).wrap_err("Setting ownership of new file")?;
+            set_attrs(
+                &fp,
+                line.mode.data.as_ref(),
+                line.owner.data.as_ref(),
+                line.group.data.as_ref(),
+                "new file",
+            )?;
         }
         config_file::LineAction::WriteFile => todo!(),
         config_file::LineAction::CreateAndCleanUpDirectory => {
@@ -240,12 +240,11 @@ fn create(line: &Line) -> eyre::Result<()> {
             }
             create_parents(dir, line_type.force)?;
             fs::DirBuilder::new().create(dir)?;
-            fixup_attrs(
+            set_attrs(
                 dir,
-                &fs::symlink_metadata(dir)?,
-                &line.mode,
-                &line.owner,
-                &line.group,
+                line.mode.data.as_ref(),
+                line.owner.data.as_ref(),
+                line.group.data.as_ref(),
                 "Setting mode of new directory",
             )?;
         }
@@ -311,32 +310,73 @@ fn create(line: &Line) -> eyre::Result<()> {
     Ok(())
 }
 
+// Abstraction over `File` and `Path` to use handle both in shared code
+trait FileRef {
+    fn set_permissions(&self, permissions: Permissions) -> io::Result<()>;
+    fn set_ownership(&self, uid: Option<u32>, gid: Option<u32>) -> io::Result<()>;
+}
+
+impl FileRef for Path {
+    fn set_permissions(&self, permissions: Permissions) -> io::Result<()> {
+        fs::set_permissions(self, permissions)
+    }
+
+    fn set_ownership(&self, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+        std::os::unix::fs::chown(self, uid, gid)
+    }
+}
+
+impl FileRef for File {
+    fn set_permissions(&self, permissions: Permissions) -> io::Result<()> {
+        self.set_permissions(permissions)
+    }
+
+    fn set_ownership(&self, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+        std::os::unix::fs::fchown(self, uid, gid)
+    }
+}
+
 fn fixup_attrs(
-    path: &Path,
+    path: &(impl FileRef + ?Sized),
     meta: &fs::Metadata,
     mode: &Option<Mode>,
     owner: &Option<FileOwner>,
     group: &Option<FileOwner>,
     name_in_error: &str,
 ) -> Result<(), eyre::Error> {
-    if let Some(specmode) = mode {
-        if specmode.value != meta.mode() {
-            fs::set_permissions(path, Permissions::from_mode(specmode.value))
-                .wrap_err_with(|| format!("Setting mode of {name_in_error}"))?;
-        }
-    }
-    let uid = owner
+    let mode = mode
+        .as_ref()
+        .filter(|specmode| specmode.value != meta.mode());
+    let owner = owner
         .as_ref()
         .map(FileOwner::as_uid)
         .transpose()?
-        .filter(|&uid| uid != meta.uid());
-    let gid = group
+        .filter(|&o| o != meta.uid())
+        .map(FileOwner::Id);
+    let group = group
         .as_ref()
         .map(FileOwner::as_gid)
         .transpose()?
-        .filter(|&gid| gid != meta.gid());
+        .filter(|&g| g != meta.gid())
+        .map(FileOwner::Id);
+    set_attrs(path, mode, owner.as_ref(), group.as_ref(), name_in_error)
+}
+
+fn set_attrs(
+    path: &(impl FileRef + ?Sized),
+    mode: Option<&Mode>,
+    owner: Option<&FileOwner>,
+    group: Option<&FileOwner>,
+    name_in_error: &str,
+) -> Result<(), eyre::Error> {
+    if let Some(specmode) = mode {
+        path.set_permissions(Permissions::from_mode(specmode.value))
+            .wrap_err_with(|| format!("Setting mode of {name_in_error}"))?;
+    }
+    let uid = owner.map(FileOwner::as_uid).transpose()?;
+    let gid = group.map(FileOwner::as_gid).transpose()?;
     if uid.is_some() || gid.is_some() {
-        std::os::unix::fs::chown(path, uid, gid)
+        path.set_ownership(uid, gid)
             .wrap_err_with(|| format!("Setting ownership of {name_in_error}"))?;
     }
     Ok(())
