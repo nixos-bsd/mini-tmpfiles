@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 cargo fmt --all --check
 cargo test --quiet --locked
 cargo clippy -- --deny warnings
