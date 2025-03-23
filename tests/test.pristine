@@ -1,9 +1,10 @@
 /root:
-total 12
+total 16
 lrwxrwxrwx 1 root   18  booted-system -> /run/booted-system/
 dr-x------ 2 root 4096  cat/
 drwxr-xr-x 2 root 4096  clobbered/
 lrwxrwxrwx 1 root   19  current-system -> /run/current-system/
+d--------- 2 root 4096  existing-dir/
 -rw-r--r-- 1 root   45  .nix-channels
 
 /root/cat:
@@ -13,9 +14,13 @@ total 4
 /root/clobbered:
 total 0
 -rw-r--r-- 1 root 0  clobbering
+
+/root/existing-dir:
+total 0
 --------------e------- /root
 --------------e------- /root/cat
 --------------e------- /root/cat/girl
 --------------e------- /root/clobbered
 --------------e------- /root/clobbered/clobbering
+--------------e------- /root/existing-dir
 --------------e------- /root/.nix-channels

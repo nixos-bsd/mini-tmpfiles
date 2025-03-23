@@ -298,7 +298,21 @@ fn create(line: &Line) -> eyre::Result<()> {
         config_file::LineAction::IgnoreNonRecursive => todo!(),
         config_file::LineAction::Remove => todo!(),
         config_file::LineAction::RemoveRecursive => todo!(),
-        config_file::LineAction::SetMode => todo!(),
+        config_file::LineAction::SetMode => {
+            let path = line.path.as_path_no_specifiers().unwrap_or_else(|| todo!());
+            let meta = fs::symlink_metadata(path);
+            if matches!(&meta, Err(e) if e.kind() == io::ErrorKind::NotFound) {
+                return Ok(());
+            }
+            fixup_attrs(
+                path,
+                &meta?,
+                &line.mode,
+                &line.owner,
+                &line.group,
+                "existing file or directory",
+            )?;
+        }
         config_file::LineAction::SetModeRecursive => todo!(),
         config_file::LineAction::SetXattr => todo!(),
         config_file::LineAction::SetXattrRecursive => todo!(),
