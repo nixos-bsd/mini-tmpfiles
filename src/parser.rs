@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::num::{IntErrorKind, ParseIntError};
 use std::ops::Range;
 use std::os::unix::ffi::OsStringExt;
@@ -77,11 +78,11 @@ pub enum ParseError {
     EmptyParseType,
     InvalidTypeCombination(u8, u8),
     InvalidTypeModifier(u8),
-    InvalidMode,
+    InvalidMode(OsString),
     DuplicateTypeModifier(u8),
     IDKWhatAServiceCredentialIs,
     InvalidCleanupAge(CleanupParseError),
-    InvalidUsername,
+    InvalidUsername(OsString),
     NullInPath,
     Field(FieldParseError),
     NonabsolutePath,
@@ -89,6 +90,55 @@ pub enum ParseError {
     EmptyPath,
     IncompleteSpecifier,
     Base64Decode(DecodeError),
+}
+
+fn debug_byte_char(b: u8) -> String {
+    if b.is_ascii() {
+        format!("{}", b as char)
+    } else {
+        format!("'\\x{b:x}'")
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::IllegalParseType(b) => write!(f, "Illegal type {:?}", *b as char),
+            ParseError::LeadingWhitespace => write!(f, "Line cannot have leading whitespace"),
+            ParseError::EmptyParseType => write!(f, "Type cannot be empty"),
+            ParseError::InvalidTypeCombination(type_, mod_) => write!(
+                f,
+                "Type {:?} cannot be modified with modifier {:?}",
+                debug_byte_char(*type_),
+                debug_byte_char(*mod_)
+            ),
+            ParseError::InvalidTypeModifier(b) => {
+                write!(f, "Invalid type modifier {:?}", debug_byte_char(*b))
+            }
+            ParseError::InvalidMode(str) => write!(f, "Invalid mode {str:?}"),
+            ParseError::DuplicateTypeModifier(b) => {
+                write!(f, "Duplicated type modifier {:?}", debug_byte_char(*b))
+            }
+            ParseError::IDKWhatAServiceCredentialIs => {
+                write!(f, "I don't know what a service credential is")
+            }
+            ParseError::InvalidCleanupAge(e) => write!(f, "Invalid cleanup age: {e:?}"),
+            ParseError::InvalidUsername(username) => write!(f, "Invalid username {username:?}"),
+            ParseError::NullInPath => write!(f, "Path cannot contain a NULL byte"),
+            ParseError::Field(e) => write!(f, "While parsing field: {e:?}"),
+            ParseError::NonabsolutePath => write!(f, "Path must be absolute"),
+            ParseError::InvalidSpecifier(b) => {
+                if b.is_ascii_graphic() {
+                    write!(f, "Invalid specifier %{}", *b as char)
+                } else {
+                    write!(f, "Invalid specifier \"%{:?}\"", debug_byte_char(*b))
+                }
+            }
+            ParseError::EmptyPath => write!(f, "Path cannot be empty"),
+            ParseError::IncompleteSpecifier => write!(f, "Incomplete specifier"),
+            ParseError::Base64Decode(e) => write!(f, "Decoding base64: {e}"),
+        }
+    }
 }
 
 impl From<DecodeError> for ParseError {
@@ -538,13 +588,13 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ParseError> {
         input = &input[1..];
     }
     if !(3..=4).contains(&input.len()) {
-        return Err(ParseError::InvalidMode);
+        return Err(ParseError::InvalidMode(OsString::from_vec(input.to_vec())));
     }
     let Ok(string) = std::str::from_utf8(input) else {
-        return Err(ParseError::InvalidMode);
+        return Err(ParseError::InvalidMode(OsString::from_vec(input.to_vec())));
     };
     let Ok(mode) = u32::from_str_radix(string, 8) else {
-        return Err(ParseError::InvalidMode);
+        return Err(ParseError::InvalidMode(string.into()));
     };
     Ok(Mode {
         value: mode,
@@ -553,7 +603,9 @@ fn parse_mode(mut input: &[u8]) -> Result<Mode, ParseError> {
 }
 fn parse_user(input: Box<[u8]>) -> Result<FileOwner, ParseError> {
     let Ok(s) = std::str::from_utf8(&input) else {
-        return Err(ParseError::InvalidUsername);
+        return Err(ParseError::InvalidUsername(OsString::from_vec(
+            input.to_vec(),
+        )));
     };
     Ok(if let Ok(id) = u32::from_str(s) {
         FileOwner::Id(id)
@@ -654,7 +706,12 @@ fn parse_type(input: &[u8]) -> Result<(LineType, bool), ParseError> {
 
 #[cfg(test)]
 mod test {
-    use std::{ffi::OsString, path::Path, str::FromStr};
+    use std::{
+        ffi::{OsStr, OsString},
+        os::unix::ffi::OsStrExt,
+        path::Path,
+        str::FromStr,
+    };
 
     use crate::{
         config_file::{CleanupAge, Line, LineAction, LineType, Spanned, SpecifierString},
@@ -789,7 +846,7 @@ mod test {
     fn test_invalid_mode_string() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"z /z -x", Path::new(""))),
-            Err(ParseError::InvalidMode)
+            Err(ParseError::InvalidMode("-x".into()))
         )
     }
     #[test]
@@ -826,7 +883,9 @@ mod test {
     fn test_invalid_username() {
         assert_eq!(
             parse_line(FileSpan::from_slice(b"Z /A - \\xFF", Path::new(""))),
-            Err(ParseError::InvalidUsername)
+            Err(ParseError::InvalidUsername(
+                OsStr::from_bytes(b"\xFF").to_os_string()
+            ))
         )
     }
     #[test]

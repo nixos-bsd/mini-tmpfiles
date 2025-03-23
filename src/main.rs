@@ -82,16 +82,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn parsed_config(config_files: &BTreeMap<OsString, PathBuf>) -> eyre::Result<Vec<Line>> {
     let mut config = Vec::new();
-    for file_path in config_files.values() {
+    for (filename, file_path) in config_files.iter() {
         let file = fs::read(file_path)?;
         let span = FileSpan::from_slice(&file, file_path);
-        for line in span.lines() {
+        for (line_no, line) in span.lines().enumerate() {
             if line.bytes().starts_with(b"#") || line.bytes().is_empty() {
                 continue;
             } else {
                 let line = parse_line(line.clone()).unwrap_or_else(|e| {
                     todo!(
-                        "Error parsing line: {e:#?} ({})",
+                        "In file {}:{line_no}: Error parsing line: {e} ({})",
+                        filename.to_string_lossy(),
                         line.bytes().escape_ascii()
                     )
                 });
